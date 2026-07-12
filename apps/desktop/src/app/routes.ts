@@ -79,12 +79,13 @@ export interface RouteContribution {
   path: string
 }
 
-export function contributedRoutes(): Array<{ key: string; path: string; render: () => ReactNode }> {
+export function contributedRoutes(): Array<{ key: string; path: string; title?: string; render: () => ReactNode }> {
   return registry
     .getArea(ROUTES_AREA)
     .map(c => ({
       key: `${c.source ?? 'core'}:${c.id}`,
       path: (c.data as RouteContribution | undefined)?.path ?? '',
+      title: c.title,
       render: c.render!
     }))
     .filter(route => Boolean(route.path.startsWith('/') && route.render) && !RESERVED_PATHS.has(route.path))
