@@ -35,6 +35,7 @@ import {
   setSplitWeights as setSplitWeightsOp,
   splitGroupZone as splitGroupZoneOp
 } from './model'
+import { rootChildSide } from './renderer/track-model'
 
 // v2: v1 trees were saved against placeholder panes with index-order zone
 // assignment (chat could land in a corner cell). Retire them wholesale.
@@ -245,6 +246,24 @@ export function setTreeSideCollapsed(side: TreeSide, collapsed: boolean) {
   if (!collapsed) {
     restoreDismissedSidePanes(side)
   }
+}
+
+/**
+ * Does the layout have a collapsible root side of `side`? ⌘J's normal target is
+ * the right sidebar; a layout without one (e.g. a terminal-on-bottom preset)
+ * lets callers fall back to the terminal so ⌘J is never a dead key. Semantic —
+ * reuses `rootChildSide`, so it tracks a ⌘\ flip / drag like the toggles do.
+ */
+export function layoutHasRootSide(side: TreeSide): boolean {
+  const tree = $layoutTree.get()
+
+  if (tree?.type !== 'split' || tree.orientation !== 'row') {
+    return false
+  }
+
+  const panes = registry.getArea('panes')
+
+  return tree.children.some(child => rootChildSide(child, id => panes.find(p => p.id === id)) === side)
 }
 
 /**

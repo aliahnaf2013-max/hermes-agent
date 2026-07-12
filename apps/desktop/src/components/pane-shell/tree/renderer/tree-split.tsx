@@ -86,8 +86,11 @@ export function TreeSplit({ node, root }: { node: SplitNode; root?: boolean }) {
   // is narrow and the pane is collapsible (edge overlay instead).
   const paneFor = (id: string) => panes.find(p => p.id === id)
 
+  // Layout-edit mode forces toggle-hidden panes (terminal off, review/preview
+  // closed) visible so they're rearrangeable — only truly-absent (unregistered)
+  // or narrow-collapsed panes stay gone. Restores itself on exit (render-only).
   const paneGone = (id: string) =>
-    !paneFor(id) || hiddenPanes.has(id) || (narrow && Boolean(paneChrome(paneFor(id)).collapsible))
+    !paneFor(id) || (!editMode && hiddenPanes.has(id)) || (narrow && Boolean(paneChrome(paneFor(id)).collapsible))
 
   const trackCtx: TrackContext = { paneFor, paneGone, overrides }
 
@@ -260,7 +263,7 @@ export function TreeSplit({ node, root }: { node: SplitNode; root?: boolean }) {
     },
     // trackCtx is derived state rebuilt per render; the drag captures it once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [axis, horizontal, node.children, node.id, node.weights, hiddenPanes, narrow, overrides, panes]
+    [axis, editMode, horizontal, node.children, node.id, node.weights, hiddenPanes, narrow, overrides, panes]
   )
 
   // Double-click a sash: every neighbor returns to its DEFAULT size.
@@ -337,7 +340,7 @@ export function TreeSplit({ node, root }: { node: SplitNode; root?: boolean }) {
       setTreeSplitWeights(node.id, !preset && !pinned ? weights.map(() => 1) : weights)
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [axis, horizontal, node.children, node.id, node.weights, hiddenPanes, narrow, overrides, panes]
+    [axis, editMode, horizontal, node.children, node.id, node.weights, hiddenPanes, narrow, overrides, panes]
   )
 
   // A run of ONLY fixed tracks can't fill the container (grow-0 all around
