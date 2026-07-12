@@ -503,13 +503,17 @@ function StripDropCaret({ groupId, stripRef }: { groupId: string; stripRef: RefO
   const targetRect = target.getBoundingClientRect()
   const x = (stack.before ? targetRect.left : targetRect.right) - stripRect.left
 
-  // Sized off the TAB's rect (not the strip's) so the caret reads as part of
-  // the tab row — the strip is a hair taller (its inset strip-line).
+  // A short centered tick (~60% of the tab), not a full-height wall — reads
+  // as an insertion point between labels, browser-tab style.
   return (
     <span
       aria-hidden
       className="pointer-events-none absolute z-50 w-px -translate-x-1/2 bg-black dark:bg-white"
-      style={{ height: targetRect.height, left: x, top: targetRect.top - stripRect.top }}
+      style={{
+        height: targetRect.height * 0.6,
+        left: x,
+        top: targetRect.top - stripRect.top + targetRect.height * 0.2
+      }}
     />
   )
 }
