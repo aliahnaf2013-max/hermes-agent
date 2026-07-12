@@ -7,6 +7,7 @@ import { useLocation } from 'react-router-dom'
 
 import { Thread } from '@/components/assistant-ui/thread'
 import { Backdrop } from '@/components/Backdrop'
+import { COMPOSER_HEART_CONFIG, HeartField } from '@/components/chat/vibe-hearts'
 import { $dropHint, $treeDragging, SESSION_TILE_DRAG } from '@/components/pane-shell/tree/store'
 import { PromptOverlays } from '@/components/prompt-overlays'
 import { Button } from '@/components/ui/button'
@@ -20,6 +21,8 @@ import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-s
 import { cn } from '@/lib/utils'
 import type { ComposerAttachment } from '@/store/composer'
 import { $pinnedSessionIds } from '@/store/layout'
+import { $petActive } from '@/store/pet'
+import { $petOverlayActive } from '@/store/pet-overlay'
 import { $gatewaySwapTarget } from '@/store/profile'
 import {
   $contextSuggestions,
@@ -251,9 +254,15 @@ export function ChatView({
   const awaitingResponse = useStore(view.$awaitingResponse)
   const busy = useStore(view.$busy)
   const contextSuggestions = useStore($contextSuggestions)
+  // Per-session (SessionView) reads — a tile IS its session, so these come
+  // from the view slice, not the global atoms (which track the primary only).
   const currentCwd = useStore(view.$cwd)
   const currentModel = useStore(view.$model)
   const currentProvider = useStore(view.$provider)
+  // A pet anywhere (in-window or popped out) owns the hearts; composer only when none.
+  const petActive = useStore($petActive)
+  const petOverlayActive = useStore($petOverlayActive)
+  const petPresent = petActive || petOverlayActive
   const freshDraftReady = useStore($freshDraftReady)
   const gatewayState = useStore($gatewayState)
   const gatewaySwapTarget = useStore($gatewaySwapTarget)
@@ -476,6 +485,18 @@ export function ChatView({
             </div>
           )}
           {showChatBar && <ScrollToBottomButton />}
+          {/* Vibe hearts rise from the composer only when no pet is out (else
+              they play on the pet). Fired by the core `reaction` event. */}
+          {!petPresent && (
+            <HeartField
+              className="absolute inset-x-0 z-30"
+              config={COMPOSER_HEART_CONFIG}
+              style={{
+                top: 0,
+                bottom: 'calc(var(--composer-measured-height) + var(--status-stack-measured-height) + 0.25rem)'
+              }}
+            />
+          )}
           {/* A session drag hovering an EDGE hands the visual to the zone
               target; the link overlay shows only for the center region. */}
           <ChatDropOverlay kind={overlayKind} />
