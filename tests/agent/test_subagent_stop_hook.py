@@ -147,6 +147,7 @@ class TestSingleTask:
         child._delegate_saved_tool_names = []
         child._credential_pool = None
         child._subagent_id = "subagent-stable-1"
+        child._subagent_goal = "Original user-facing delegated task"
         with patch("tools.delegate_tool._build_child_agent", return_value=child), patch(
             "tools.delegate_tool._run_single_child"
         ) as mock_run:
@@ -156,6 +157,7 @@ class TestSingleTask:
             }
             delegate_task(goal="go", parent_agent=_make_parent())
         assert captured[0]["child_subagent_id"] == "subagent-stable-1"
+        assert captured[0]["child_goal"] == "Original user-facing delegated task"
 
 
 @pytest.mark.real_child_builder
