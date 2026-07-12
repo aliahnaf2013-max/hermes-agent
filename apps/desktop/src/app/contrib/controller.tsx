@@ -12,8 +12,10 @@ import {
   $layoutTree,
   bindTreeSideVisibility,
   declareDefaultTree,
+  dismissTreePane,
   dockPaneBeside,
   mirrorLayoutTree,
+  paneRootSide,
   registerLayoutResetHandler,
   registerPaneCloser,
   registerPaneOpener,
@@ -451,14 +453,17 @@ registry.register({
   } satisfies PaletteContribution
 })
 
-// Sessions' visibility is the LEFT-side toggle's job — Close just collapses
-// the side (⌘B truthful, titlebar button flips back).
-registerPaneCloser('sessions', () => setSidebarOpen(false))
-// Files mirrors it on the RIGHT: without a closer, its tab's Close falls into
-// the DISMISSED-pane path — removed from the tree and NOT recoverable from
-// the titlebar toggle (the pane just seems to vanish). Collapse the side
-// instead, ⌘J truthful.
-registerPaneCloser('files', () => setFileBrowserOpen(false))
+// Sessions/files Close = collapse their SIDE (⌘B/⌘J truthful, titlebar button
+// flips back) — but only while the pane actually lives in that root side
+// column. Dragged next to main, a side collapse can't hide it (the collapse
+// skips main-bearing children), so Close falls back to dismissal there —
+// otherwise ⌘W/Close silently no-op.
+registerPaneCloser('sessions', () =>
+  paneRootSide('sessions') === 'left' ? setSidebarOpen(false) : dismissTreePane('sessions')
+)
+registerPaneCloser('files', () =>
+  paneRootSide('files') === 'right' ? setFileBrowserOpen(false) : dismissTreePane('files')
+)
 
 // A preview target lands NEXT TO the file tree — position-aware: wherever
 // files currently lives (default rail, ⌘\-flipped, dragged into a stack), the

@@ -146,13 +146,22 @@ export function fixedTrackSize(node: LayoutNode, axis: 'row' | 'column', ctx: Tr
       return css
     }
 
-    // A zone is a fixed track only when EVERY shown pane sizes itself along
-    // the axis (a pure sidebar stack). Mixing a sidebar pane into a flex
-    // zone (files fronted in the Focus mono-stack) must NOT snap the whole
-    // zone to sidebar width — the flex pane keeps the zone flex.
-    const sizes = shownPaneIds(node, ctx).map(declared)
+    // Which zones are FIXED tracks:
+    //  - a MAIN-bearing zone (workspace/tile stacked in) is flex-at-heart —
+    //    mixing a sidebar pane into it (files fronted in the Focus mono-stack)
+    //    must NOT snap the whole zone to sidebar width;
+    //  - any other zone stays fixed as long as SOME tenant declares a size —
+    //    dropping a size-less pane (the terminal has height but no width)
+    //    into the 237px files sidebar must not balloon it to a flex track.
+    const ids = shownPaneIds(node, ctx)
+    const sizes = ids.map(declared)
+    const declaredSizes = sizes.filter((size): size is string => size !== null)
 
-    if (sizes.length === 0 || sizes.some(size => size === null)) {
+    if (declaredSizes.length === 0) {
+      return null
+    }
+
+    if (sizes.length !== declaredSizes.length && ids.some(id => paneChrome(ctx.paneFor(id)).placement === 'main')) {
       return null
     }
 
@@ -160,7 +169,7 @@ export function fixedTrackSize(node: LayoutNode, axis: 'row' | 'column', ctx: Tr
     // dropping a pane into a zone — the drop fronts it — or switching tabs
     // must not resize the container (dropping sessions into a wider fixed
     // zone used to snap the whole zone down to sidebar width).
-    return cssMax(sizes) ?? null
+    return cssMax(declaredSizes) ?? null
   }
 
   const visible = node.children.filter(child => !subtreeGone(child, ctx))

@@ -271,6 +271,33 @@ export function removeTreePane(paneId: string) {
   }
 }
 
+/** Which root-row side a pane currently lives in, or null when it's nested
+ *  with main (dragged into the middle) — where a side collapse can't hide it.
+ *  Lets side-bound closers (files/sessions) fall back to dismissal. */
+export function paneRootSide(paneId: string): null | TreeSide {
+  const tree = $layoutTree.get()
+
+  if (tree?.type !== 'split' || tree.orientation !== 'row') {
+    return null
+  }
+
+  const panes = registry.getArea('panes')
+  const child = tree.children.find(c => allPaneIds(c).includes(paneId))
+
+  return child ? rootChildSide(child, id => panes.find(p => p.id === id)) : null
+}
+
+/** The closer-less Close: dismiss the pane (removed + remembered; reveal
+ *  intent or a layout reset un-dismisses). */
+export function dismissTreePane(paneId: string) {
+  const tree = $layoutTree.get()
+
+  if (tree) {
+    setDismissed(paneId, true)
+    commit(removePane(tree, paneId))
+  }
+}
+
 export function closeTreePane(paneId: string) {
   const closer = paneClosers[paneId]
 
@@ -299,12 +326,7 @@ export function closeTreePane(paneId: string) {
     return
   }
 
-  const tree = $layoutTree.get()
-
-  if (tree) {
-    setDismissed(paneId, true)
-    commit(removePane(tree, paneId))
-  }
+  dismissTreePane(paneId)
 }
 
 /**

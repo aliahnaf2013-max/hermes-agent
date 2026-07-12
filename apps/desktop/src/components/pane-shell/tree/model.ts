@@ -185,17 +185,21 @@ export function normalize(node: LayoutNode): LayoutNode | null {
   return { ...node, children, weights }
 }
 
-/** Remove a pane wherever it lives. */
+/** Remove a pane wherever it lives. Closing the ACTIVE tab activates its
+ *  previous neighbor (the next one when it was first) — browser-tab feel,
+ *  never a jump to the strip's start. */
 export function removePane(node: LayoutNode, paneId: string): LayoutNode | null {
   const walk = (n: LayoutNode): LayoutNode => {
     if (n.type === 'group') {
-      if (!n.panes.includes(paneId)) {
+      const at = n.panes.indexOf(paneId)
+
+      if (at === -1) {
         return n
       }
 
       const panes = n.panes.filter(p => p !== paneId)
 
-      return { ...n, panes, active: n.active === paneId ? panes[0] : n.active }
+      return { ...n, panes, active: n.active === paneId ? panes[Math.max(0, at - 1)] : n.active }
     }
 
     return { ...n, children: n.children.map(walk) }
@@ -229,9 +233,12 @@ export function insertAtGroup(
         const at = before ? n.panes.indexOf(before) : -1
         const panes = at >= 0 ? [...n.panes.slice(0, at), paneId, ...n.panes.slice(at)] : [...n.panes, paneId]
 
-        // Gaining a pane clears an explicit header-hide: a stack you can't
-        // see (or leave) is a trap, so the chips always come back on drop.
-        return { ...n, panes, active: paneId, headerHidden: undefined }
+        // Gaining a pane pins the header EXPLICITLY shown (not just cleared):
+        // a stack you can't see is a trap, and once a zone has ever stacked
+        // the bar STAYS when it drops back to one tab — the auto-hide flicker
+        // while dragging tabs around felt broken. Hiding is the user's call
+        // (double-click / zone menu).
+        return { ...n, panes, active: paneId, headerHidden: false }
       }
 
       const orientation: Orientation = pos === 'left' || pos === 'right' ? 'row' : 'column'

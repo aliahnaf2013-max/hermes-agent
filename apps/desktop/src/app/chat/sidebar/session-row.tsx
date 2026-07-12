@@ -92,7 +92,7 @@ export function SidebarSessionRow({
     >
       <SidebarRowShell
         actions={
-          <div className="relative z-2 grid w-[1.375rem] place-items-center">
+          <div className="relative z-2 grid w-[1.375rem] place-items-center" data-row-actions>
             {!isWorking && (
               <span className="pointer-events-none absolute right-6 top-1/2 min-w-6 -translate-y-1/2 text-right text-[0.625rem] leading-none text-(--ui-text-tertiary) opacity-0 transition-opacity group-hover:opacity-100">
                 {age}
@@ -131,13 +131,14 @@ export function SidebarSessionRow({
         )}
         data-working={isWorking ? 'true' : undefined}
         onPointerDown={event => {
-          // Reorder drags belong to dnd-kit (the grab handle); controls (the
-          // ⋯ menu) keep their own gestures. Everything else on the row is a
-          // session drag source — a POINTER drag on the shared drag session
+          // Reorder drags belong to dnd-kit (the grab handle); the ⋯ actions
+          // cluster keeps its own gestures. Everything else on the row —
+          // including the row-body BUTTON, the natural grab surface — is a
+          // session drag source: a POINTER drag on the shared drag session
           // (never native HTML5 DnD: no macOS snap-back, Esc aborts
           // instantly). Sub-threshold releases stay ordinary clicks, so
           // resume / pin / open-in-window are untouched.
-          if ((event.target as HTMLElement).closest('[data-reorder-handle], button, input, textarea')) {
+          if ((event.target as HTMLElement).closest('[data-reorder-handle], [data-row-actions]')) {
             return
           }
 
