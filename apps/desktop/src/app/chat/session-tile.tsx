@@ -27,7 +27,7 @@ import type { ChatMessage } from '@/lib/chat-messages'
 import { sessionTitle } from '@/lib/chat-runtime'
 import { createComposerAttachmentScope } from '@/store/composer'
 import { sessionAwaitingInput } from '@/store/prompts'
-import { $sessions, sessionMatchesStoredId } from '@/store/session'
+import { $gatewayState, $sessions, sessionMatchesStoredId } from '@/store/session'
 import {
   $sessionStates,
   $sessionTiles,
@@ -152,12 +152,16 @@ export function SessionTilePane({ storedSessionId }: { storedSessionId: string }
   const tiles = useStore($sessionTiles)
   const tile = tiles.find(t => t.storedSessionId === storedSessionId)
   const runtimeId = tile?.runtimeId ?? null
+  const gatewayOpen = useStore($gatewayState) === 'open'
   const resumingRef = useRef(false)
   const view = useMemo(() => buildTileView(storedSessionId), [storedSessionId])
 
-  // Bind a live runtime id once (and again after a tile Retry clears error).
+  // Same gating as the primary's route resume (use-route-resume): never fire
+  // session.resume before the gateway is OPEN. Persisted tiles mount at boot
+  // while it's still connecting — an ungated resume rejected there and
+  // latched every restored tile into the error card.
   useEffect(() => {
-    if (runtimeId || tile?.error || resumingRef.current) {
+    if (!gatewayOpen || runtimeId || tile?.error || resumingRef.current) {
       return
     }
 
@@ -178,7 +182,18 @@ export function SessionTilePane({ storedSessionId }: { storedSessionId: string }
       .finally(() => {
         resumingRef.current = false
       })
-  }, [runtimeId, storedSessionId, tile?.error])
+  }, [gatewayOpen, runtimeId, storedSessionId, tile?.error])
+
+  // The gateway (re)opening invalidates any latched error — it likely came
+  // from a not-yet-open gateway or the previous connection. Clearing it
+  // retriggers the resume effect: one bounded auto-retry per (re)connect,
+  // mirroring the primary path's became-open resync.
+  useEffect(() => {
+    if (gatewayOpen && tile?.error) {
+      patchSessionTile(storedSessionId, { error: undefined })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gatewayOpen, storedSessionId])
 
   if (tile?.error) {
     return (
