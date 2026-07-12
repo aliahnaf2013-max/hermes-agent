@@ -503,11 +503,13 @@ function StripDropCaret({ groupId, stripRef }: { groupId: string; stripRef: RefO
   const targetRect = target.getBoundingClientRect()
   const x = (stack.before ? targetRect.left : targetRect.right) - stripRect.left
 
+  // Sized off the TAB's rect (not the strip's) so the caret reads as part of
+  // the tab row — the strip is a hair taller (its inset strip-line).
   return (
     <span
       aria-hidden
-      className="pointer-events-none absolute inset-y-0 z-50 w-0.5 -translate-x-1/2 bg-black dark:bg-white"
-      style={{ left: x }}
+      className="pointer-events-none absolute z-50 w-px -translate-x-1/2 bg-black dark:bg-white"
+      style={{ height: targetRect.height, left: x, top: targetRect.top - stripRect.top }}
     />
   )
 }
