@@ -67,6 +67,15 @@ export function subZonePosition(zones: EngineZone[], groupId: string, x: number,
   return rect ? radialPosition(rect, x, y) : 'center'
 }
 
+/** True when the pointer is over `groupId`'s tab strip. A drop there STACKS
+ *  (joins the tabs) — the strip is where tabs live, so it must win over the
+ *  radial top-edge band that would otherwise read as "split top". */
+function pointerOverTabStrip(groupId: string, x: number, y: number): boolean {
+  return document
+    .elementsFromPoint(x, y)
+    .some(el => el instanceof HTMLElement && el.closest(`[data-zone-tabstrip="${CSS.escape(groupId)}"]`) !== null)
+}
+
 const sameHint = (a: DropHint | null, b: DropHint | null) =>
   a?.groupId === b?.groupId &&
   a?.pos === b?.pos &&
@@ -323,11 +332,21 @@ export function startPaneDrag(
     const groupId = groupIds.length > 0 ? (primaryZone(zones, groupIds, lastPoint) ?? undefined) : undefined
 
     // Sub-positions only make sense for a single-zone drop; a Shift-span
-    // always merges (pos ignored).
+    // always merges (pos ignored). Over the target's tab strip, force a stack
+    // (center) — dropping onto the tabs joins them, never splits.
     const pos: DropPosition =
-      groupIds.length === 1 && groupId ? subZonePosition(zones, groupId, lastPoint.x, lastPoint.y) : 'center'
+      groupIds.length === 1 && groupId
+        ? pointerOverTabStrip(groupId, lastPoint.x, lastPoint.y)
+          ? 'center'
+          : subZonePosition(zones, groupId, lastPoint.x, lastPoint.y)
+        : 'center'
 
     const next: DropHint | null = groupIds.length > 0 ? { kind: 'group', groupId, groupIds, pos } : null
+
+    // Over a deny area (no zone — titlebar / statusbar / gutters / off-window)
+    // the release cancels; the cursor says so up front. Every real zone is a
+    // valid target, so `grabbing` elsewhere.
+    document.body.style.cursor = next ? 'grabbing' : 'no-drop'
 
     if (!sameHint($dropHint.get(), next)) {
       $dropHint.set(next)
@@ -347,6 +366,7 @@ export function startPaneDrag(
     window.removeEventListener('pointermove', onMove, true)
     window.removeEventListener('pointerup', onUp, true)
     window.removeEventListener('pointercancel', onCancel, true)
+    window.removeEventListener('keydown', onKey, true)
 
     if (mode === 'reorder' && visual) {
       const { dragIndex, target } = visual
@@ -394,7 +414,19 @@ export function startPaneDrag(
   const onUp = () => finish(true)
   const onCancel = () => finish(false)
 
+  // Esc aborts the drag — the zone selection vanishes and nothing moves, the
+  // universal "never mind" for an in-flight drag. Capture-phase + stop so it
+  // doesn't also close a pane/overlay behind the drag.
+  const onKey = (ev: KeyboardEvent) => {
+    if (ev.key === 'Escape') {
+      ev.preventDefault()
+      ev.stopPropagation()
+      finish(false)
+    }
+  }
+
   window.addEventListener('pointermove', onMove, true)
   window.addEventListener('pointerup', onUp, true)
   window.addEventListener('pointercancel', onCancel, true)
+  window.addEventListener('keydown', onKey, true)
 }

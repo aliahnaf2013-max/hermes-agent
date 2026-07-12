@@ -337,10 +337,12 @@ export function TreeGroup({
             // Active = sidebar surface (merges into body). Strip =
             // `--theme-card-seed` (VS Code `tab.inactiveBackground`). Line =
             // PANE_TAB_STRIP_LINE; active tab cuts through it.
+            // data-zone-tabstrip: a drop over here STACKS (drag-session reads it).
             className={cn(
               'group/pane-header flex h-7 shrink-0 select-none bg-(--pane-tab-strip-bg) [-webkit-app-region:no-drag] [--pane-tab-active-bg:var(--ui-sidebar-surface-background)] [--pane-tab-strip-bg:var(--theme-card-seed)]',
               PANE_TAB_STRIP_LINE
             )}
+            data-zone-tabstrip={node.id}
             onContextMenu={e => {
               menuPaneRef.current =
                 (e.target as HTMLElement).closest('[data-tree-tab]')?.getAttribute('data-tree-tab') ?? undefined
