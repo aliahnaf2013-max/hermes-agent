@@ -214,7 +214,10 @@ export function insertAtGroup(
   node: LayoutNode,
   targetGroupId: string,
   paneId: string,
-  pos: DropPosition
+  pos: DropPosition,
+  /** Center drops only: stack BEFORE this pane id (`null`/omitted = append) —
+   *  the tab-strip insertion divider's slot. */
+  before?: null | string
 ): LayoutNode | null {
   const walk = (n: LayoutNode): LayoutNode => {
     if (n.type === 'group') {
@@ -223,15 +226,18 @@ export function insertAtGroup(
       }
 
       if (pos === 'center') {
+        const at = before ? n.panes.indexOf(before) : -1
+        const panes = at >= 0 ? [...n.panes.slice(0, at), paneId, ...n.panes.slice(at)] : [...n.panes, paneId]
+
         // Gaining a pane clears an explicit header-hide: a stack you can't
         // see (or leave) is a trap, so the chips always come back on drop.
-        return { ...n, panes: [...n.panes, paneId], active: paneId, headerHidden: undefined }
+        return { ...n, panes, active: paneId, headerHidden: undefined }
       }
 
       const orientation: Orientation = pos === 'left' || pos === 'right' ? 'row' : 'column'
-      const before = pos === 'left' || pos === 'top'
+      const leading = pos === 'left' || pos === 'top'
       const added = group([paneId])
-      const children = before ? [added, n] : [n, added]
+      const children = leading ? [added, n] : [n, added]
 
       return split(orientation, children, [1, 1])
     }
@@ -272,7 +278,7 @@ function shapeSignature(node: LayoutNode): string {
 export function movePane(
   root: LayoutNode,
   paneId: string,
-  target: { groupId: string; pos: DropPosition }
+  target: { groupId: string; pos: DropPosition; before?: null | string }
 ): LayoutNode {
   const from = findGroupOfPane(root, paneId)
 
@@ -292,7 +298,7 @@ export function movePane(
     return root
   }
 
-  const next = insertAtGroup(without, target.groupId, paneId, target.pos) ?? root
+  const next = insertAtGroup(without, target.groupId, paneId, target.pos, target.before) ?? root
 
   return shapeSignature(next) === shapeSignature(root) ? root : next
 }

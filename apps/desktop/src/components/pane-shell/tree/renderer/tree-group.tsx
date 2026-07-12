@@ -10,7 +10,7 @@
  */
 
 import { useStore } from '@nanostores/react'
-import { type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode, useRef } from 'react'
+import { type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode, type RefObject, useRef } from 'react'
 
 import { Codicon } from '@/components/ui/codicon'
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from '@/components/ui/context-menu'
@@ -339,7 +339,7 @@ export function TreeGroup({
             // PANE_TAB_STRIP_LINE; active tab cuts through it.
             // data-zone-tabstrip: a drop over here STACKS (drag-session reads it).
             className={cn(
-              'group/pane-header flex h-7 shrink-0 select-none bg-(--pane-tab-strip-bg) [-webkit-app-region:no-drag] [--pane-tab-active-bg:var(--ui-sidebar-surface-background)] [--pane-tab-strip-bg:var(--theme-card-seed)]',
+              'group/pane-header relative flex h-7 shrink-0 select-none bg-(--pane-tab-strip-bg) [-webkit-app-region:no-drag] [--pane-tab-active-bg:var(--ui-sidebar-surface-background)] [--pane-tab-strip-bg:var(--theme-card-seed)]',
               PANE_TAB_STRIP_LINE
             )}
             data-zone-tabstrip={node.id}
@@ -414,6 +414,7 @@ export function TreeGroup({
             >
               <Codicon name={node.minimized ? 'chevron-down' : 'chevron-up'} size="0.75rem" />
             </button>
+            <StripDropCaret groupId={node.id} stripRef={stripRef} />
           </div>
         </ZoneMenu>
       )}
@@ -467,6 +468,47 @@ export function TreeGroup({
           hint re-renders only this (tiny) node, not the whole zone. */}
       <ZoneDropOverlay isEmpty={isEmpty} node={node} />
     </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Tab-strip insertion caret
+// ---------------------------------------------------------------------------
+
+/**
+ * The insertion divider for a stack drop: a 2px vertical line at the slot the
+ * dragged tab will land in (before `stack.before`, or after the last tab).
+ * Absolute over the strip — pure overlay, zero layout shift. #000 on light,
+ * #FFF on dark. Split out so per-pointermove `$dropHint` churn re-renders
+ * only this node (same isolation contract as ZoneDropOverlay).
+ */
+function StripDropCaret({ groupId, stripRef }: { groupId: string; stripRef: RefObject<HTMLDivElement | null> }) {
+  const hint = useStore($dropHint)
+  const strip = stripRef.current
+  const stack = hint?.groupId === groupId ? hint.stack : undefined
+
+  if (stack === undefined || !strip) {
+    return null
+  }
+
+  // Slot x: the before-tab's left edge, or the last tab's right edge.
+  const tabs = [...strip.querySelectorAll<HTMLElement>('[data-tree-tab]')]
+  const target = stack.before ? tabs.find(el => el.dataset.treeTab === stack.before) : tabs.at(-1)
+
+  if (!target) {
+    return null
+  }
+
+  const stripRect = strip.getBoundingClientRect()
+  const targetRect = target.getBoundingClientRect()
+  const x = (stack.before ? targetRect.left : targetRect.right) - stripRect.left
+
+  return (
+    <span
+      aria-hidden
+      className="pointer-events-none absolute inset-y-0 z-50 w-0.5 -translate-x-1/2 bg-black dark:bg-white"
+      style={{ left: x }}
+    />
   )
 }
 
@@ -532,6 +574,13 @@ function ZoneDropOverlay({ isEmpty, node }: { isEmpty: boolean; node: GroupNode 
   }
 
   const primary = hint?.groupId === node.id
+
+  // Hovering the target's TAB STRIP: the insertion caret (StripDropCaret)
+  // owns the affordance — the zone sheet stands down so the two never stack.
+  if (primary && hint?.stack !== undefined) {
+    return null
+  }
+
   const active = hint?.groupIds?.includes(node.id) ?? false
   const multi = (hint?.groupIds?.length ?? 0) > 1
   // Sub-positions only exist for a single-zone target (a Shift-span merges).

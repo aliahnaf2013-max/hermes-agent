@@ -233,11 +233,14 @@ export function SessionTileDropBridge() {
       clear()
     }
 
-    const onDragEnd = () => {
-      // Belt-and-suspenders: if the browser ended the drag without a `drop`
-      // (a hostile handler slipped past the armor), commit the last visible
-      // edge target — what the user aimed at is what they get.
-      if (!committed && lastSplitTarget) {
+    const onDragEnd = (event: DragEvent) => {
+      // `dropEffect === 'none'` means the browser CANCELLED the drag — Esc, or
+      // a release over a deny area. Never commit those (the Esc-still-added
+      // bug). Belt-and-suspenders only for the swallowed-drop case: the drag
+      // ended over a live target (effect stayed 'copy') but no `drop` fired.
+      const cancelled = event.dataTransfer?.dropEffect === 'none'
+
+      if (!committed && !cancelled && lastSplitTarget) {
         commitSplit(lastSplitTarget)
       }
 

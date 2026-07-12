@@ -4,20 +4,16 @@
  * Shift = select-many (combined zone range), ClosestCenter primary on drop.
  *
  * Dragging is FancyZones-style: the LAYOUT STAYS FIXED and every zone lights
- * up as a whole-region drop target; dropping moves the pane into that zone
- * (joining its tab stack). Tab drags inside their strip REORDER instead
- * (browser-tab feel); tearing away converts the drag into a zone move.
- * Pointer-capture based.
+ * up as a whole-region drop target; NOTHING moves until release (tab reorder
+ * included — the strip shows an insertion divider, not a live shuffle).
+ * Esc aborts. Over a zone's TAB STRIP the drop stacks at the divider's slot;
+ * elsewhere in the zone the radial position picks center/edge. Pointer-
+ * capture based.
  */
 
 import type { PointerEvent as ReactPointerEvent } from 'react'
 
-import {
-  REORDER_DRAG_TRANSITION_CSS,
-  REORDER_RAIL_TRANSITION_CSS,
-  reorderCommitHaptic,
-  reorderStepHaptic
-} from '@/lib/reorder'
+import { reorderCommitHaptic, reorderStepHaptic } from '@/lib/reorder'
 
 import type { DropPosition } from '../model'
 import { $dropHint, $treeDragging, type DropHint, mergeTreeZones, moveTreePane, reorderTreePane } from '../store'
@@ -67,18 +63,51 @@ export function subZonePosition(zones: EngineZone[], groupId: string, x: number,
   return rect ? radialPosition(rect, x, y) : 'center'
 }
 
-/** True when the pointer is over `groupId`'s tab strip. A drop there STACKS
- *  (joins the tabs) — the strip is where tabs live, so it must win over the
- *  radial top-edge band that would otherwise read as "split top". */
-function pointerOverTabStrip(groupId: string, x: number, y: number): boolean {
-  return document
+const stripFor = (groupId: string) =>
+  document.querySelector<HTMLElement>(`[data-zone-tabstrip="${CSS.escape(groupId)}"]`)
+
+/** Insertion slot within a strip from the pointer x against the OTHER tabs'
+ *  midpoints: stack BEFORE the returned pane id (`null` = append). */
+function slotBefore(strip: HTMLElement, x: number, excludePaneId: string): { before: null | string } {
+  for (const tab of strip.querySelectorAll<HTMLElement>('[data-tree-tab]')) {
+    if (tab.dataset.treeTab === excludePaneId) {
+      continue
+    }
+
+    const r = tab.getBoundingClientRect()
+
+    if (x < r.left + r.width / 2) {
+      return { before: tab.dataset.treeTab ?? null }
+    }
+  }
+
+  return { before: null }
+}
+
+/** The insertion slot when the pointer is over `groupId`'s tab strip;
+ *  `undefined` when it isn't. A drop on the strip STACKS at that slot — the
+ *  strip is where tabs live, so it wins over the radial top-edge band that
+ *  would otherwise read as "split top". */
+function stripSlotAt(
+  groupId: string,
+  x: number,
+  y: number,
+  excludePaneId: string
+): undefined | { before: null | string } {
+  const overStrip = document
     .elementsFromPoint(x, y)
     .some(el => el instanceof HTMLElement && el.closest(`[data-zone-tabstrip="${CSS.escape(groupId)}"]`) !== null)
+
+  const strip = overStrip ? stripFor(groupId) : null
+
+  return strip ? slotBefore(strip, x, excludePaneId) : undefined
 }
 
 const sameHint = (a: DropHint | null, b: DropHint | null) =>
   a?.groupId === b?.groupId &&
   a?.pos === b?.pos &&
+  a?.stack?.before === b?.stack?.before &&
+  (a?.stack === undefined) === (b?.stack === undefined) &&
   (a?.groupIds?.length ?? 0) === (b?.groupIds?.length ?? 0) &&
   (a?.groupIds ?? []).every((id, i) => b?.groupIds?.[i] === id)
 
@@ -104,32 +133,16 @@ export interface DoubleTapContext {
   onDoubleTap: () => void
 }
 
-/** Live transform state for an in-flight tab reorder (all imperative — the
- *  strip's DOM nodes are stable while the drag holds the order). The feel is
- *  the SHARED reorder primitive (lib/reorder.ts): the dragged chip glides
- *  between snapped slots, neighbors spring aside, haptics tick per slot. */
-interface ReorderVisual {
-  tabs: { el: HTMLElement; mid: number }[]
-  dragIndex: number
-  dragEl: HTMLElement
-  dragLeft: number
-  /** How far a displaced neighbor slides (the dragged chip's cell pitch). */
-  shift: number
-  /** Resting LEFT for the dragged chip at each insertion slot (0..n-1). */
-  slotLefts: number[]
-  /** Current insertion index among the OTHER tabs (0..n-1). */
-  target: number
-}
-
 /**
  * Begin a pane drag from any handle. A sub-threshold release is a click
  * (`onTap`, used to activate tabs; rapid repeat fires `double.onDoubleTap`
- * instead). With a `reorder` context (tab drags), horizontal movement inside
- * the strip REORDERS the tabs (visual slide during the drag, one commit on
- * release); tearing away from the strip converts the drag into a zone move.
- * Zone mode: zones light up, Shift extends the highlight range
- * (HighlightedZones::Update), release drops into the ClosestCenter primary
- * zone.
+ * instead). With a `reorder` context (tab drags), movement inside the strip
+ * targets an insertion slot — the strip renders a divider at it, NOTHING
+ * moves until release (placement-on-release, like every other drop); tearing
+ * away from the strip converts the drag into a zone move. Zone mode: zones
+ * light up, the target's tab strip stacks at its divider slot, Shift extends
+ * the highlight range, release drops into the ClosestCenter primary zone.
+ * Esc aborts either mode.
  */
 export function startPaneDrag(
   paneId: string,
@@ -155,7 +168,7 @@ export function startPaneDrag(
   let zones: EngineZone[] = []
   let lastPoint = { x: sx, y: sy }
   let mode: 'idle' | 'reorder' | 'zone' = 'idle'
-  let visual: ReorderVisual | null = null
+  let dimmed: HTMLElement | null = null
 
   try {
     handle.setPointerCapture?.(pointerId)
@@ -163,77 +176,36 @@ export function startPaneDrag(
     // Synthetic events (automation) have no active pointer.
   }
 
-  const clearReorderVisual = () => {
-    if (!visual) {
-      return
-    }
+  const publishHint = (next: DropHint | null) => {
+    if (!sameHint($dropHint.get(), next)) {
+      if (next?.stack !== undefined && $dropHint.get()?.stack?.before !== next.stack.before) {
+        reorderStepHaptic()
+      }
 
-    for (const tab of visual.tabs) {
-      tab.el.style.transform = ''
-      tab.el.style.transition = ''
-      tab.el.style.zIndex = ''
+      $dropHint.set(next)
     }
+  }
 
-    visual = null
+  const startDragChrome = () => {
+    document.body.style.cursor = 'grabbing'
+    document.body.style.userSelect = 'none'
+    // The dragged tab dims for the drag's life — the divider says where it
+    // GOES, the dim says what MOVES. No live shuffle (placement-on-release).
+    dimmed = reorder?.strip.querySelector<HTMLElement>(`[data-tree-tab="${CSS.escape(paneId)}"]`) ?? null
+    dimmed?.style.setProperty('opacity', '0.45')
   }
 
   const enterZoneMode = () => {
-    clearReorderVisual()
     mode = 'zone'
     // The layout never restructures mid-drag, so zone rects are stable.
     zones = snapshotZones()
     $treeDragging.set(paneId)
-    document.body.style.cursor = 'grabbing'
-    document.body.style.userSelect = 'none'
+    startDragChrome()
   }
 
   const enterReorderMode = () => {
-    const els = [...reorder!.strip.querySelectorAll<HTMLElement>('[data-tree-tab]')]
-    const dragIndex = els.findIndex(el => el.dataset.treeTab === paneId)
-
-    if (dragIndex === -1) {
-      enterZoneMode()
-
-      return
-    }
-
-    const rects = els.map(el => el.getBoundingClientRect())
-    const gap = rects.length > 1 ? Math.max(0, rects[1].left - rects[0].right) : 0
-    const others = rects.filter((_, i) => i !== dragIndex)
-
-    // Snapped slot positions (profile-rail semantics): inserting at slot k
-    // puts the dragged chip after k others — its resting left is the run of
-    // those k widths from the strip start. Chip widths vary (unlike the
-    // profile squares' fixed pitch) so slots are cumulative, not a multiple.
-    const slotLefts: number[] = []
-    let acc = rects[0].left
-
-    for (let k = 0; k < rects.length; k++) {
-      slotLefts.push(acc)
-      acc += (others[k]?.width ?? 0) + gap
-    }
-
-    visual = {
-      tabs: els.map((el, i) => ({ el, mid: rects[i].left + rects[i].width / 2 })),
-      dragIndex,
-      dragEl: els[dragIndex],
-      dragLeft: rects[dragIndex].left,
-      shift: rects[dragIndex].width + gap,
-      slotLefts,
-      target: dragIndex
-    }
-
-    // Dragged chip GLIDES between snapped slots on the drag transition;
-    // neighbors spring aside on the rail transition — the shared feel.
-    for (const [i, el] of els.entries()) {
-      el.style.transition = i === dragIndex ? REORDER_DRAG_TRANSITION_CSS : REORDER_RAIL_TRANSITION_CSS
-    }
-
-    els[dragIndex].style.zIndex = '10'
-
     mode = 'reorder'
-    document.body.style.cursor = 'grabbing'
-    document.body.style.userSelect = 'none'
+    startDragChrome()
   }
 
   const withinStrip = (x: number, y: number) => {
@@ -249,44 +221,6 @@ export function startPaneDrag(
       y >= r.top - TEAR_OFF_SLACK_PX &&
       y <= r.bottom + TEAR_OFF_SLACK_PX
     )
-  }
-
-  const applyReorderVisual = (x: number) => {
-    if (!visual) {
-      return
-    }
-
-    // Insertion slot from the pointer against the others' resting midpoints.
-    const target = visual.tabs.filter((tab, i) => i !== visual!.dragIndex && tab.mid < x).length
-
-    if (target === visual.target) {
-      return
-    }
-
-    visual.target = target
-    reorderStepHaptic()
-
-    // The dragged chip SNAPS to its slot's resting position and glides there
-    // on the drag transition — it steps slot-to-slot (the profile rail's
-    // stepThroughCells feel), never floating freely under the pointer.
-    const dx = visual.slotLefts[target] - visual.dragLeft
-    visual.dragEl.style.transform = dx ? `translateX(${dx}px)` : ''
-
-    // Neighbors between the old and new slot spring aside by the dragged
-    // cell's pitch; everyone else rests. (`j` = a tab's index among the
-    // OTHERS — the space `target` indexes into.)
-    for (const [i, tab] of visual.tabs.entries()) {
-      if (i === visual.dragIndex) {
-        continue
-      }
-
-      const j = i < visual.dragIndex ? i : i - 1
-
-      const tx =
-        i > visual.dragIndex && j < target ? -visual.shift : i < visual.dragIndex && j >= target ? visual.shift : 0
-
-      tab.el.style.transform = tx ? `translateX(${tx}px)` : ''
-    }
   }
 
   const onMove = (ev: PointerEvent) => {
@@ -309,7 +243,13 @@ export function startPaneDrag(
         // Tear-off: the tab leaves the strip and becomes a zone move.
         enterZoneMode()
       } else {
-        applyReorderVisual(ev.clientX)
+        publishHint({
+          kind: 'group',
+          groupId: reorder!.groupId,
+          groupIds: [reorder!.groupId],
+          pos: 'center',
+          stack: slotBefore(reorder!.strip, ev.clientX, paneId)
+        })
 
         return
       }
@@ -331,31 +271,32 @@ export function startPaneDrag(
 
     const groupId = groupIds.length > 0 ? (primaryZone(zones, groupIds, lastPoint) ?? undefined) : undefined
 
-    // Sub-positions only make sense for a single-zone drop; a Shift-span
-    // always merges (pos ignored). Over the target's tab strip, force a stack
-    // (center) — dropping onto the tabs joins them, never splits.
-    const pos: DropPosition =
-      groupIds.length === 1 && groupId
-        ? pointerOverTabStrip(groupId, lastPoint.x, lastPoint.y)
-          ? 'center'
-          : subZonePosition(zones, groupId, lastPoint.x, lastPoint.y)
+    // Over the target's TAB STRIP the drop stacks at the divider's slot;
+    // sub-positions only make sense for a single-zone drop (a Shift-span
+    // always merges, pos ignored).
+    const stack =
+      groupIds.length === 1 && groupId ? stripSlotAt(groupId, lastPoint.x, lastPoint.y, paneId) : undefined
+
+    const pos: DropPosition = stack
+      ? 'center'
+      : groupIds.length === 1 && groupId
+        ? subZonePosition(zones, groupId, lastPoint.x, lastPoint.y)
         : 'center'
 
-    const next: DropHint | null = groupIds.length > 0 ? { kind: 'group', groupId, groupIds, pos } : null
+    const next: DropHint | null = groupIds.length > 0 ? { kind: 'group', groupId, groupIds, pos, stack } : null
 
     // Over a deny area (no zone — titlebar / statusbar / gutters / off-window)
     // the release cancels; the cursor says so up front. Every real zone is a
     // valid target, so `grabbing` elsewhere.
     document.body.style.cursor = next ? 'grabbing' : 'no-drop'
 
-    if (!sameHint($dropHint.get(), next)) {
-      $dropHint.set(next)
-    }
+    publishHint(next)
   }
 
   const finish = (commit: boolean) => {
     document.body.style.cursor = restoreCursor
     document.body.style.userSelect = restoreSelect
+    dimmed?.style.removeProperty('opacity')
 
     try {
       handle.releasePointerCapture?.(pointerId)
@@ -368,12 +309,18 @@ export function startPaneDrag(
     window.removeEventListener('pointercancel', onCancel, true)
     window.removeEventListener('keydown', onKey, true)
 
-    if (mode === 'reorder' && visual) {
-      const { dragIndex, target } = visual
-      clearReorderVisual()
+    const hint = $dropHint.get()
 
-      if (commit && reorder && target !== dragIndex) {
-        reorderTreePane(reorder.groupId, paneId, target)
+    if (commit && mode === 'reorder' && reorder && hint?.stack !== undefined) {
+      // Slot -> index among the OTHER tabs (reorderPaneInGroup inserts there).
+      const others = [...reorder.strip.querySelectorAll<HTMLElement>('[data-tree-tab]')]
+        .map(el => el.dataset.treeTab)
+        .filter((id): id is string => Boolean(id) && id !== paneId)
+
+      const toIndex = hint.stack.before ? others.indexOf(hint.stack.before) : others.length
+
+      if (toIndex >= 0) {
+        reorderTreePane(reorder.groupId, paneId, toIndex)
         reorderCommitHaptic()
       }
     }
@@ -382,15 +329,15 @@ export function startPaneDrag(
       // Drop what the hint SHOWS — the overlay and the commit share one truth
       // (the raw highlight set can hold both seam neighbors; the hint already
       // collapsed that to the primary unless Shift made the span explicit).
-      const hint = $dropHint.get()
       const targets = hint?.groupIds ?? []
 
       if (targets.length > 1) {
         // Shift-span: merge the highlighted zones, dropping the pane across them.
         mergeTreeZones([...targets], paneId, hint?.groupId ?? null)
       } else if (hint?.groupId) {
-        // center = join the stack; an edge = split the zone and land there.
-        moveTreePane(paneId, { groupId: hint.groupId, pos: hint.pos ?? 'center' })
+        // strip = stack at the divider slot; center = join the stack;
+        // an edge = split the zone and land there.
+        moveTreePane(paneId, { groupId: hint.groupId, pos: hint.pos ?? 'center', before: hint.stack?.before })
       }
     }
 

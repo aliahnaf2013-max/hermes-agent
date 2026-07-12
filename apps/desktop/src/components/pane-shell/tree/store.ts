@@ -411,6 +411,10 @@ export interface DropHint {
   /** Full highlighted set (multi-zone when Shift extends the range). */
   groupIds?: string[]
   pos?: DropPosition
+  /** Hovering the target's TAB STRIP: the drop stacks at a specific slot —
+   *  before this pane id, or at the end (`before: null`). The strip renders
+   *  the insertion divider; the zone sheet stands down. */
+  stack?: { before: null | string }
 }
 
 /** Live drop target under the pointer while dragging. */
@@ -644,7 +648,7 @@ export function dockPaneBeside(paneId: string, anchorPaneId: string) {
   }
 }
 
-export function moveTreePane(paneId: string, target: { groupId: string; pos: DropPosition }) {
+export function moveTreePane(paneId: string, target: { groupId: string; pos: DropPosition; before?: null | string }) {
   const tree = $layoutTree.get()
 
   if (!tree) {
