@@ -2843,6 +2843,7 @@ def delegate_task(
                     parent_turn_id=getattr(parent_agent, "_current_turn_id", "") or "",
                     child_session_id=getattr(_child_agent, "session_id", None),
                     child_subagent_id=getattr(_child_agent, "_subagent_id", None),
+                    child_goal=getattr(_child_agent, "_subagent_goal", None),
                     child_role=child_role,
                     child_summary=entry.get("summary"),
                     child_status=entry.get("status"),
