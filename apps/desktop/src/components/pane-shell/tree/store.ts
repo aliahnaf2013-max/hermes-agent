@@ -367,14 +367,14 @@ export function revealTreePane(paneId: string) {
  * contribution declares `collapsible: true` leave the grid and become
  * edge overlays (see NarrowOverlays in renderer.tsx).
  */
-export const $narrowViewport = atom(
-  typeof window !== 'undefined' && window.matchMedia(SIDEBAR_COLLAPSE_MEDIA_QUERY).matches
-)
+// Optional-chained + `typeof window` guarded like every other matchMedia call
+// site: this module is imported by non-DOM code paths (session actions) whose
+// test env has no `window`/`matchMedia` — an unguarded call throws at load.
+const narrowQuery = typeof window !== 'undefined' ? window.matchMedia?.(SIDEBAR_COLLAPSE_MEDIA_QUERY) : undefined
 
-if (typeof window !== 'undefined') {
-  const query = window.matchMedia(SIDEBAR_COLLAPSE_MEDIA_QUERY)
-  query.addEventListener('change', event => $narrowViewport.set(event.matches))
-}
+export const $narrowViewport = atom(Boolean(narrowQuery?.matches))
+
+narrowQuery?.addEventListener('change', event => $narrowViewport.set(event.matches))
 
 /** The titlebar flip toggle (⌘\): mirror the whole layout left↔right. */
 export function mirrorLayoutTree() {

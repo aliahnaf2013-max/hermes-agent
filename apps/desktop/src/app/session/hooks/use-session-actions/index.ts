@@ -95,6 +95,36 @@ function applyStoredUsage(stored: { input_tokens?: number | null; output_tokens?
   setCurrentUsage(current => ({ ...current, input, output, total: input + output }))
 }
 
+// `session.create` params from the current profile + sticky-UI model/effort/fast,
+// ensuring the gateway is on that profile first. Shared by the primary send path
+// and the "open in split" tile path; `cwd` is the one thing that differs (the
+// live composer cwd for a send, the resolved new-session cwd for a fresh tile).
+//
+// Resolving null profile to the active gateway's is load-bearing: in global-remote
+// mode one backend serves every profile, so an omitted profile silently lands the
+// chat on the launch (default) profile — the "rubberbands back to default" bug.
+// A no-op for single-profile/local-pooled users (a backend resolves its own launch
+// profile to None). The sticky UI model/effort/fast ride as per-session overrides,
+// never the profile default (that lives in Settings → Model).
+async function desktopSessionCreateParams(cwd: string): Promise<Record<string, unknown>> {
+  const profile = $newChatProfile.get() ?? normalizeProfileKey($activeGatewayProfile.get())
+  await ensureGatewayProfile(profile)
+
+  const model = $currentModel.get().trim()
+  const provider = $currentProvider.get().trim()
+  const effort = $currentReasoningEffort.get().trim()
+
+  return {
+    cols: 96,
+    source: 'desktop',
+    ...(cwd && { cwd }),
+    ...(profile ? { profile } : {}),
+    ...(model ? { model, ...(provider ? { provider } : {}) } : {}),
+    ...(effort ? { reasoning_effort: effort } : {}),
+    ...($currentFastMode.get() ? { fast: true } : {})
+  }
+}
+
 export function useSessionActions({
   activeSessionId,
   activeSessionIdRef,
@@ -164,37 +194,8 @@ export function useSessionActions({
       creatingSessionRef.current = true
 
       try {
-        // A plain new session (top "New Session", /new, keybind) leaves
-        // $newChatProfile null to mean "use the live context"; the per-profile
-        // "+" sets it explicitly. Resolve null to the active gateway profile so
-        // session.create always carries it: in global-remote mode one backend
-        // serves every profile, so an omitted profile param silently lands the
-        // chat on the launch (default) profile — the "rubberbands back to
-        // default" bug. This is a no-op for single-profile/local-pooled users:
-        // a backend resolves its own launch profile to None (_profile_home).
-        const newChatProfile = $newChatProfile.get() ?? normalizeProfileKey($activeGatewayProfile.get())
-        await ensureGatewayProfile(newChatProfile)
-        const cwd = $currentCwd.get().trim() || workspaceCwdForNewSession()
-        // The composer's model/effort/fast is sticky UI state ($currentModel,
-        // $currentProvider, $currentReasoningEffort, $currentFastMode). Ship it
-        // with every session.create so the new chat opens on whatever the picker
-        // shows — applied as per-session overrides, never written to the profile
-        // default (that lives in Settings → Model).
-        const uiModel = $currentModel.get().trim()
-        const uiProvider = $currentProvider.get().trim()
-        const uiEffort = $currentReasoningEffort.get().trim()
-        const uiFast = $currentFastMode.get()
-
-        const created = await requestGateway<SessionCreateResponse>('session.create', {
-          cols: 96,
-          source: 'desktop',
-          ...(cwd && { cwd }),
-          ...(newChatProfile ? { profile: newChatProfile } : {}),
-          ...(uiModel ? { model: uiModel, ...(uiProvider ? { provider: uiProvider } : {}) } : {}),
-          ...(uiEffort ? { reasoning_effort: uiEffort } : {}),
-          ...(uiFast ? { fast: true } : {})
-        })
-
+        const params = await desktopSessionCreateParams($currentCwd.get().trim() || workspaceCwdForNewSession())
+        const created = await requestGateway<SessionCreateResponse>('session.create', params)
         const stored = created.stored_session_id ?? null
 
         if (
@@ -279,27 +280,11 @@ export function useSessionActions({
    *  "new chat beside" affordance). */
   const openNewSessionTile = useCallback(
     async (dir: SplitDir = 'right') => {
-      const newChatProfile = $newChatProfile.get() ?? normalizeProfileKey($activeGatewayProfile.get())
-
       try {
-        await ensureGatewayProfile(newChatProfile)
-
-        const cwd = resolveNewSessionCwd().trim() || workspaceCwdForNewSession()
-        const uiModel = $currentModel.get().trim()
-        const uiProvider = $currentProvider.get().trim()
-        const uiEffort = $currentReasoningEffort.get().trim()
-        const uiFast = $currentFastMode.get()
-
-        const created = await requestGateway<SessionCreateResponse>('session.create', {
-          cols: 96,
-          source: 'desktop',
-          ...(cwd && { cwd }),
-          ...(newChatProfile ? { profile: newChatProfile } : {}),
-          ...(uiModel ? { model: uiModel, ...(uiProvider ? { provider: uiProvider } : {}) } : {}),
-          ...(uiEffort ? { reasoning_effort: uiEffort } : {}),
-          ...(uiFast ? { fast: true } : {})
-        })
-
+        // Fresh tile → the resolved new-session cwd (project/default), not the
+        // primary composer's live cwd.
+        const params = await desktopSessionCreateParams(resolveNewSessionCwd().trim() || workspaceCwdForNewSession())
+        const created = await requestGateway<SessionCreateResponse>('session.create', params)
         const stored = created.stored_session_id
 
         if (!stored) {
@@ -309,17 +294,12 @@ export function useSessionActions({
           return
         }
 
-        // Seed the sidebar + the per-runtime cache, but do NOT steal the
-        // primary selection — this session lives in the tile.
+        // Seed the sidebar + per-runtime cache, but DON'T steal the primary
+        // selection — this session lives in the tile. Prime it with the create
+        // runtime so the tile skips a redundant resume.
         upsertOptimisticSession(created, stored, null, null)
-
         const runtimeInfo = applyRuntimeInfo(created.info)
-
-        updateSessionState(
-          created.session_id,
-          state => (runtimeInfo ? { ...state, ...runtimeInfo } : state),
-          stored
-        )
+        updateSessionState(created.session_id, state => (runtimeInfo ? { ...state, ...runtimeInfo } : state), stored)
 
         openSessionTile(stored, dir)
         patchSessionTile(stored, { runtimeId: created.session_id })
