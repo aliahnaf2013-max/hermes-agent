@@ -20,6 +20,8 @@ import { useEffect, useMemo, useRef } from 'react'
 
 import { useGatewayRequest } from '@/app/gateway/hooks/use-gateway-request'
 import { blobToDataUrl } from '@/app/session/hooks/use-prompt-actions/utils'
+import { findGroupOfPane } from '@/components/pane-shell/tree/model'
+import { $layoutTree, moveTreePane } from '@/components/pane-shell/tree/store'
 import { formatRefValue } from '@/components/assistant-ui/directive-text'
 import { Button } from '@/components/ui/button'
 import { transcribeAudio } from '@/hermes'
@@ -230,6 +232,26 @@ function tileTitle(storedSessionId: string): string {
   return stored ? sessionTitle(stored) : 'Session'
 }
 
+/** Layout reset → every session tile collapses into the MAIN zone as a tab
+ *  after the workspace (the primary session stays the first tab), the "smart"
+ *  reset: N scattered tiles become one tab bar over the chat instead of
+ *  re-docking to their old edges.
+ *
+ *  Runs BEFORE generic adoption (see registerLayoutResetHandler) — the tiles
+ *  aren't in the fresh tree yet, so each `moveTreePane` ADDS the tile into the
+ *  workspace group as a tab (append). The main group id is re-read each pass
+ *  because appending returns a new tree. */
+export function stackSessionTilesIntoMain(): void {
+  for (const tile of $sessionTiles.get()) {
+    const tree = $layoutTree.get()
+    const mainGroup = tree ? findGroupOfPane(tree, 'workspace')?.id : null
+
+    if (mainGroup) {
+      moveTreePane(`session-tile:${tile.storedSessionId}`, { groupId: mainGroup, pos: 'center' })
+    }
+  }
+}
+
 /** Keep pane contributions mirroring `$sessionTiles` (+ titles from
  *  `$sessions`). Tiles dock against main on the chosen edge, flex width. */
 export const watchSessionTiles = paneMirror<SessionTile>({
@@ -239,6 +261,7 @@ export const watchSessionTiles = paneMirror<SessionTile>({
   prefix: 'session-tile',
   dir: t => t.dir,
   anchor: t => t.anchor,
+  before: t => t.before,
   minWidth: '20rem',
   title: tileTitle,
   render: storedSessionId => <SessionTilePane storedSessionId={storedSessionId} />,

@@ -1,7 +1,7 @@
 import { useStore } from '@nanostores/react'
 import type * as React from 'react'
 
-import { writeSessionDrag } from '@/app/chat/composer/inline-refs'
+import { startSessionDrag } from '@/app/chat/session-drag'
 import { PlatformAvatar } from '@/app/messaging/platform-icon'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
@@ -129,36 +129,19 @@ export function SidebarSessionRow({
           dragging && 'z-10 cursor-grabbing bg-(--ui-sidebar-surface-background)',
           className
         )}
-        data-native-drag
-        data-session-drag-id={session.id}
-        data-session-drag-profile={session.profile || 'default'}
-        data-session-drag-title={title}
         data-working={isWorking ? 'true' : undefined}
-        draggable
-        onDragStart={event => {
-          // Reorder drags belong to dnd-kit (the grab handle) — cancel the
-          // native drag so the two DnD systems don't fight.
-          if ((event.target as HTMLElement).closest('[data-reorder-handle]')) {
-            event.preventDefault()
-
+        onPointerDown={event => {
+          // Reorder drags belong to dnd-kit (the grab handle); controls (the
+          // ⋯ menu) keep their own gestures. Everything else on the row is a
+          // session drag source — a POINTER drag on the shared drag session
+          // (never native HTML5 DnD: no macOS snap-back, Esc aborts
+          // instantly). Sub-threshold releases stay ordinary clicks, so
+          // resume / pin / open-in-window are untouched.
+          if ((event.target as HTMLElement).closest('[data-reorder-handle], button, input, textarea')) {
             return
           }
 
-          // The tiling bridge + link overlay detect the drag from the MIME
-          // type alone (readable during dragover) — no store writes here: a
-          // synchronous store→render during dragstart can cancel native drags.
-          writeSessionDrag(event.dataTransfer, {
-            id: session.id,
-            profile: session.profile || 'default',
-            title
-          })
-          // react-dnd's HTML5Backend (mounted app-wide by the file tree)
-          // cancels any window-bubbled dragstart it didn't originate
-          // (handleTopDragStart preventDefaults "foreign" draggables, killing
-          // the drag before a single dragover). Nothing above the React root
-          // needs this event — the bridge reads the drag from
-          // dataTransfer.types during dragover — so stop it here.
-          event.stopPropagation()
+          startSessionDrag({ id: session.id, profile: session.profile || 'default', title }, event)
         }}
         ref={ref}
         style={style}

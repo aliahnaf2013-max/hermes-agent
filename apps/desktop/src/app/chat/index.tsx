@@ -8,7 +8,7 @@ import { useLocation } from 'react-router-dom'
 import { Thread } from '@/components/assistant-ui/thread'
 import { Backdrop } from '@/components/Backdrop'
 import { COMPOSER_HEART_CONFIG, HeartField } from '@/components/chat/vibe-hearts'
-import { $dropHint, $treeDragging, SESSION_TILE_DRAG } from '@/components/pane-shell/tree/store'
+import { $sessionTileDragging, $sessionTileEdgeHover } from '@/components/pane-shell/tree/store'
 import { PromptOverlays } from '@/components/prompt-overlays'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
@@ -45,7 +45,7 @@ import { ChatDropOverlay } from './chat-drop-overlay'
 import { ChatSwapOverlay } from './chat-swap-overlay'
 import { ChatBar, ChatBarFallback } from './composer'
 import { requestComposerInsert, requestComposerInsertRefs } from './composer/focus'
-import { droppedFileInlineRefs, type SessionDragPayload, sessionInlineRef } from './composer/inline-refs'
+import { droppedFileInlineRefs } from './composer/inline-refs'
 import { useComposerScope } from './composer/scope'
 import type { ChatBarState } from './composer/types'
 import { type DroppedFile, partitionDroppedFiles } from './hooks/use-composer-actions'
@@ -392,30 +392,23 @@ export function ChatView({
     [composerScope.target, currentCwd, onAttachDroppedItems]
   )
 
-  // Dropping a sidebar session inserts an @session link (the existing
-  // "link to chat" affordance) — kept as-is. The tiling bridge only claims
-  // EDGE drops; center drops fall through here.
-  const onDropSession = useCallback(
-    (session: SessionDragPayload) => {
-      requestComposerInsertRefs([sessionInlineRef(session)], { target: composerScope.target })
-    },
-    [composerScope.target]
-  )
+  // Session drags are POINTER drags (session-drag.ts) — never native DnD.
+  // The drop zone below only handles files; session drops commit through the
+  // drag session itself, which routes a center/link drop to this surface's
+  // composer via `data-composer-target`.
+  const { dragKind, dropHandlers } = useFileDropZone({ enabled: showChatBar, onDropFiles })
 
-  const { dragKind, dropHandlers } = useFileDropZone({ enabled: showChatBar, onDropFiles, onDropSession })
+  // While a session drag targets one of this surface's EDGES or a tab strip,
+  // the zone overlay/caret owns the visual — the link overlay stands down.
+  // It shows for the whole drag on every chat surface otherwise (the drag
+  // session's global sentinel, not a per-surface hover chain).
+  // COMPUTED booleans, never the raw `$dropHint`: the hint churns on every
+  // pointer-crossing of every drag (pane drags included), and a re-render
+  // here is the WHOLE surface — thread, composer, header — per mounted tile.
+  const sessionDragging = useStore($sessionTileDragging)
+  const sessionEdgeHover = useStore($sessionTileEdgeHover)
 
-  // While a session drag targets one of this surface's EDGES (tile drop), the
-  // zone overlay owns the visual — the link overlay stands down.
-  // The link overlay is driven by the GLOBAL drag signal (the tiling bridge's
-  // sentinel, derived from native drag types), not this surface's dragenter
-  // chain — it must show for the whole drag on every chat surface, standing
-  // down only while an edge (split) target is aimed.
-  const dropHint = useStore($dropHint)
-  const sessionDragging = useStore($treeDragging) === SESSION_TILE_DRAG
-  const sessionEdgeHover = Boolean(dropHint?.pos && dropHint.pos !== 'center')
-
-  const overlayKind: DragKind =
-    dragKind === 'files' ? 'files' : (sessionDragging || dragKind === 'session') && !sessionEdgeHover ? 'session' : null
+  const overlayKind: DragKind = dragKind === 'files' ? 'files' : sessionDragging && !sessionEdgeHover ? 'session' : null
 
   return (
     <div
@@ -423,6 +416,7 @@ export function ChatView({
         'relative isolate flex h-full min-w-0 flex-col overflow-hidden bg-(--ui-chat-surface-background)',
         className
       )}
+      data-composer-target={composerScope.target}
       data-session-anchor={sessionAnchor}
     >
       <Backdrop />

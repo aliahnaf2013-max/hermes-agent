@@ -33,10 +33,11 @@
 
 import { useEffect } from 'react'
 
-import { snapshotZones, subZonePosition } from '@/components/pane-shell/tree/renderer/drag-session'
-import { $dropHint, $treeDragging, revealTreePane, SESSION_TILE_DRAG } from '@/components/pane-shell/tree/store'
+import { findGroup } from '@/components/pane-shell/tree/model'
+import { snapshotZones, stripHit, subZonePosition } from '@/components/pane-shell/tree/renderer/drag-session'
+import { $dropHint, $layoutTree, $treeDragging, revealTreePane, SESSION_TILE_DRAG } from '@/components/pane-shell/tree/store'
 import type { EngineZone } from '@/components/pane-shell/tree/zones-engine'
-import { openSessionTile, type SplitDir } from '@/store/session-states'
+import { openSessionTile, type TileDock } from '@/store/session-states'
 
 import { dragHasSession, readSessionDrag, type SessionDragPayload } from './composer/inline-refs'
 
@@ -63,7 +64,29 @@ function lockDropEffect(transfer: DataTransfer | null) {
 interface SplitTarget {
   anchor: string
   payload: SessionDragPayload
-  pos: SplitDir
+  pos: TileDock
+  /** Center (stack) drops: the strip divider's slot. */
+  before?: null | string
+}
+
+const zoneOf = (groupId: string) => {
+  const tree = $layoutTree.get()
+
+  return tree ? findGroup(tree, groupId) : null
+}
+
+/** Any pane in a zone — the anchor a dropped tile docks against (its group is
+ *  the real target). A session drops into ANY zone now, not just chat ones. */
+function zoneAnchorPane(groupId: string): null | string {
+  const group = zoneOf(groupId)
+
+  return group?.active ?? group?.panes[0] ?? null
+}
+
+/** A zone hosts a chat surface — its body CENTER is a link-to-chat drop
+ *  (the composer overlay owns it); a non-chat zone center just stacks. */
+function isChatZone(groupId: string): boolean {
+  return (zoneOf(groupId)?.panes ?? []).some(p => p === 'workspace' || p.startsWith('session-tile:'))
 }
 
 export function SessionTileDropBridge() {
@@ -106,9 +129,6 @@ export function SessionTileDropBridge() {
     const groupAt = (elements: HTMLElement[]): HTMLElement | null =>
       elements.map(el => el.closest<HTMLElement>('[data-tree-group]')).find(Boolean) ?? null
 
-    const surfaceAt = (elements: HTMLElement[]): HTMLElement | null =>
-      elements.map(el => el.closest<HTMLElement>('[data-session-anchor]')).find(Boolean) ?? null
-
     const payloadFromSource = (target: EventTarget | null): SessionDragPayload | null => {
       const source = target instanceof HTMLElement ? target.closest<HTMLElement>('[data-native-drag]') : null
       const id = source?.dataset.sessionDragId
@@ -122,9 +142,9 @@ export function SessionTileDropBridge() {
         : null
     }
 
-    const commitSplit = ({ anchor, payload, pos }: SplitTarget) => {
+    const commitSplit = ({ anchor, before, payload, pos }: SplitTarget) => {
       committed = true
-      openSessionTile(payload.id, pos, anchor)
+      openSessionTile(payload.id, pos, anchor, before)
       // A tile for this session may already exist (openSessionTile is
       // idempotent — e.g. persisted from an earlier run): a drop must never
       // feel dead, so front/unhide/un-dismiss it either way.
@@ -178,27 +198,31 @@ export function SessionTileDropBridge() {
         return
       }
 
-      // The composer (and everything in it) is always the link/attach drop;
-      // elsewhere the shared radial targeting decides center vs edge.
-      const pos = elements.some(el => el.closest('[data-slot="composer-root"]'))
-        ? 'center'
-        : subZonePosition((zones ??= snapshotZones()), groupId, event.clientX, event.clientY)
+      // ANY zone's TAB STRIP stacks the session at the caret's slot; the
+      // composer body is the link/attach drop (surface owns it); a chat
+      // zone's radial-center is also link; everything else is a split, and a
+      // non-chat zone's center stacks (append). The dropped tile docks against
+      // ANY pane in the hovered zone — its group is the real target.
+      const anchor = zoneAnchorPane(groupId)
+      const hit = stripHit(event.clientX, event.clientY)
+      const onStrip = Boolean(hit && hit.groupId === groupId)
+      const overComposer = elements.some(el => el.closest('[data-slot="composer-root"]'))
+      const radial = onStrip ? 'center' : subZonePosition((zones ??= snapshotZones()), groupId, event.clientX, event.clientY)
 
-      lastSplitTarget =
-        pos === 'center' || !currentPayload
-          ? null
-          : {
-              anchor: surfaceAt(elements)?.dataset.sessionAnchor ?? 'workspace',
-              payload: currentPayload,
-              pos: pos as SplitDir
-            }
+      // A link drop (composer, or a chat zone's non-strip center) is the
+      // surface's own onDropSession — the bridge claims no target.
+      const link = !onStrip && radial === 'center' && (overComposer || isChatZone(groupId))
+      const stack = onStrip ? { before: hit!.before } : undefined
+      const pos: TileDock = onStrip ? 'center' : radial
 
-      // Publish the hovered zone even at center — the overlay fades its sheet
-      // there (the link overlay owns the visual) but stays primed for edges.
+      lastSplitTarget = link || !currentPayload || !anchor ? null : { anchor, before: stack?.before, payload: currentPayload, pos }
+
+      // Publish the hovered zone even at a link center — the overlay fades its
+      // sheet there (the link overlay owns the visual) but stays primed.
       const current = $dropHint.get()
 
-      if (current?.groupId !== groupId || current?.pos !== pos) {
-        $dropHint.set({ groupId, groupIds: [groupId], kind: 'group', pos })
+      if (current?.groupId !== groupId || current?.pos !== pos || current?.stack?.before !== stack?.before) {
+        $dropHint.set({ groupId, groupIds: [groupId], kind: 'group', pos, stack })
       }
     }
 
@@ -207,18 +231,14 @@ export function SessionTileDropBridge() {
         return
       }
 
-      const elements = elementsAt(event.clientX, event.clientY)
-      const groupId = groupAt(elements)?.dataset.treeGroup
-
-      const pos =
-        $dropHint.get()?.pos ??
-        (groupId ? subZonePosition((zones ??= snapshotZones()), groupId, event.clientX, event.clientY) : 'center')
-
       const payload = readSessionDrag(event.dataTransfer) ?? currentPayload
+      // The dragover loop already resolved this pointer position into a
+      // target (strip stack / edge split / center-link) — commit that truth.
+      const target = lastSplitTarget
 
-      // Only edge drops are ours; a center drop falls through to the
+      // Only strip/edge drops are ours; a center drop falls through to the
       // surface's own onDropSession (the link).
-      if (!payload || pos === 'center') {
+      if (!payload || !target) {
         clear()
 
         return
@@ -229,7 +249,7 @@ export function SessionTileDropBridge() {
       // hover state, and skips the link insert. Swallowing the event here
       // stranded that state — the stuck "drop to link" sheet after a split.
       event.preventDefault()
-      commitSplit({ anchor: surfaceAt(elements)?.dataset.sessionAnchor ?? 'workspace', payload, pos: pos as SplitDir })
+      commitSplit({ ...target, payload })
       clear()
     }
 

@@ -246,7 +246,7 @@ export const en: Translations = {
       'view.prevTerminal': 'Previous terminal',
       'view.closeTerminal': 'Close terminal',
       'view.terminalSelection': 'Send terminal selection to composer',
-      'view.closePreviewTab': 'Close preview tab',
+      'view.closeTab': 'Close tab',
       'view.flipPanes': 'Swap sidebar sides',
       'appearance.toggleMode': 'Toggle light / dark',
       'profile.default': 'Switch to default profile',

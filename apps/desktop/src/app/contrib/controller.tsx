@@ -14,6 +14,7 @@ import {
   declareDefaultTree,
   dockPaneBeside,
   mirrorLayoutTree,
+  registerLayoutResetHandler,
   registerPaneCloser,
   registerPaneOpener,
   resetLayoutTree,
@@ -47,7 +48,7 @@ import { $reviewOpen, closeReview, REVIEW_PANE_ID } from '@/store/review'
 import { $currentCwd } from '@/store/session'
 
 import { watchRouteTiles } from '../chat/route-tile'
-import { watchSessionTiles } from '../chat/session-tile'
+import { stackSessionTilesIntoMain, watchSessionTiles } from '../chat/session-tile'
 import { SessionTileDropBridge } from '../chat/session-tile-drop-bridge'
 import { $terminalTakeover, setTerminalTakeover } from '../right-sidebar/store'
 
@@ -333,6 +334,10 @@ watchContributedPanes()
 // main.
 watchSessionTiles()
 watchRouteTiles()
+
+// Layout reset collapses every session tile into main as a tab (after the
+// workspace) instead of re-scattering them — pre-placed before adoption.
+registerLayoutResetHandler(stackSessionTilesIntoMain)
 
 // ---------------------------------------------------------------------------
 // Titlebar chrome toggles -> tree. The TitlebarControls buttons keep their

@@ -53,15 +53,21 @@ export function dropSessionState(runtimeId: string) {
  *  session tiles and route (page) tiles. */
 export type SplitDir = 'bottom' | 'left' | 'right' | 'top'
 
+/** Where a tile lands on adoption: an edge split, or `center` = stack into
+ *  the anchor's zone as a tab (a drop on the zone's tab strip). */
+export type TileDock = 'center' | SplitDir
 
 export interface SessionTile {
   /** Stored session id — the durable identity (runtime ids are ephemeral). */
   storedSessionId: string
-  /** Edge to dock against `anchor` on adoption (default right). */
-  dir?: SplitDir
+  /** Dock against `anchor` on adoption (default right; center = stack). */
+  dir?: TileDock
   /** Pane to dock against (a drop's target zone) — default the workspace.
    *  In-memory only: after first adoption the tree remembers placement. */
   anchor?: string
+  /** Center docks: stack BEFORE this pane id (`null`/omitted = append) —
+   *  the strip divider's slot. In-memory, like `anchor`. */
+  before?: null | string
   /** Live runtime id once the tile's resume has bound one. */
   runtimeId?: string
   /** Resume failed terminally (shown in the tile; retryable). */
@@ -194,12 +200,13 @@ export function sessionTileDelegate(): SessionTileDelegate | null {
 }
 
 /** Open (or front) a tile for a stored session, docked on `dir` (default
- *  right). Idempotent — an already-open tile keeps its original edge. */
-export function openSessionTile(storedSessionId: string, dir: SplitDir = 'right', anchor?: string) {
+ *  right; `center` = stack into the anchor's zone, `before` = strip slot).
+ *  Idempotent — an already-open tile keeps its original placement. */
+export function openSessionTile(storedSessionId: string, dir: TileDock = 'right', anchor?: string, before?: null | string) {
   const tiles = $sessionTiles.get()
 
   if (!tiles.some(t => t.storedSessionId === storedSessionId)) {
-    saveTiles([...tiles, { anchor, dir, storedSessionId }])
+    saveTiles([...tiles, { anchor, before, dir, storedSessionId }])
   }
 }
 

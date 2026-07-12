@@ -4,7 +4,7 @@
  * the persisted tree is the user's customization; reset returns to default.
  */
 
-import { atom } from 'nanostores'
+import { atom, computed } from 'nanostores'
 
 import { SIDEBAR_COLLAPSE_MEDIA_QUERY } from '@/app/layout-constants'
 import { setPluginEnabled } from '@/contrib/plugins-store'
@@ -17,6 +17,7 @@ import { clearAllPaneSizeOverrides } from '@/store/panes'
 import {
   allPaneIds,
   type DropPosition,
+  findGroup,
   findGroupOfPane,
   groupLeafIds,
   insertAtGroup,
@@ -168,6 +169,95 @@ export function registerPaneCloser(paneId: string, close: () => void) {
  */
 export function registerPaneOpener(paneId: string, open: () => void) {
   paneOpeners[paneId] = open
+}
+
+const resetHandlers = new Set<() => void>()
+
+/** Run during a layout reset, BEFORE generic adoption — lets an owner
+ *  pre-place its panes into the fresh default tree (session tiles collapse
+ *  into main as tabs) so adoption sees them already placed and never scatters
+ *  them to their old edges. */
+export function registerLayoutResetHandler(fn: () => void): () => void {
+  resetHandlers.add(fn)
+
+  return () => {
+    resetHandlers.delete(fn)
+  }
+}
+
+/** The zone the user last interacted with (clicked / focused into) — the ⌘W
+ *  target when nothing is DOM-focused (activeElement is often `body` after a
+ *  click lands on a non-focusable surface). Tracked by trackActiveTreeGroup. */
+export const $activeTreeGroup = atom<null | string>(null)
+
+/** Record the interacted zone (pointerdown / focusin). Idempotent. */
+export function noteActiveTreeGroup(groupId: null | string) {
+  if (groupId !== $activeTreeGroup.get()) {
+    $activeTreeGroup.set(groupId)
+  }
+}
+
+/** Install the active-zone tracker (call once from the tree root). Records the
+ *  `[data-tree-group]` under each pointerdown / focusin so ⌘W knows which
+ *  zone's tab to close even when nothing is DOM-focused. */
+export function trackActiveTreeGroup(): () => void {
+  const track = (event: Event) => {
+    const el = event.target instanceof HTMLElement ? event.target : null
+    const groupId = el?.closest<HTMLElement>('[data-tree-group]')?.dataset.treeGroup
+
+    if (groupId) {
+      console.warn('[cmdw] active zone =', groupId)
+      noteActiveTreeGroup(groupId)
+    }
+  }
+
+  window.addEventListener('pointerdown', track, true)
+  window.addEventListener('focusin', track, true)
+
+  return () => {
+    window.removeEventListener('pointerdown', track, true)
+    window.removeEventListener('focusin', track, true)
+  }
+}
+
+/** The active pane of the zone the user is in — the DOM-focused zone, else the
+ *  last-interacted one ($activeTreeGroup). Null when neither resolves to a live
+ *  zone. The ⌘W target. */
+export function focusedTreePane(): null | string {
+  const tree = $layoutTree.get()
+
+  if (!tree) {
+    return null
+  }
+
+  const el = typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null
+  const domGroup = el?.closest<HTMLElement>('[data-tree-group]')?.dataset.treeGroup
+  const groupId = domGroup ?? $activeTreeGroup.get() ?? undefined
+
+  return (groupId ? findGroup(tree, groupId)?.active : null) ?? null
+}
+
+/** ⌘W: close the focused zone's active tab. Routes through the pane's closer
+ *  (session tile / files / terminal…); the uncloseable workspace is a no-op.
+ *  Returns false when there's nothing to close, so the key can fall through
+ *  (the caller special-cases panes with their OWN tab strip, e.g. preview). */
+export function closeFocusedTreeTab(): boolean {
+  const active = focusedTreePane()
+
+  if (!active) {
+    return false
+  }
+
+  const uncloseable = (registry.getArea('panes').find(c => c.id === active)?.data as { uncloseable?: boolean } | undefined)
+    ?.uncloseable
+
+  if (uncloseable) {
+    return false
+  }
+
+  closeTreePane(active)
+
+  return true
 }
 
 /** Remove a pane from the tree WITHOUT a dismissal record — for surfaces
@@ -421,6 +511,24 @@ export interface DropHint {
 export const $dropHint = atom<DropHint | null>(null)
 
 /**
+ * Derived session-drag booleans for HEAVY subscribers (the chat surfaces).
+ * `$dropHint` churns on every pointer-crossing during ANY drag; a chat surface
+ * subscribing to it raw re-renders its whole thread per hint change. These
+ * computeds collapse the churn to booleans that only notify on actual flips —
+ * and stay `false` throughout pane/tab drags, which chat never cares about.
+ */
+export const $sessionTileDragging = computed($treeDragging, dragging => dragging === SESSION_TILE_DRAG)
+
+/** True while a session drag aims at a zone EDGE (a tile split) or a tab
+ *  strip (a stack) — the moments the chat surfaces' "link to chat" overlay
+ *  must stand down. */
+export const $sessionTileEdgeHover = computed(
+  [$treeDragging, $dropHint],
+  (dragging, hint) =>
+    dragging === SESSION_TILE_DRAG && ((hint?.pos !== undefined && hint.pos !== 'center') || hint?.stack !== undefined)
+)
+
+/**
  * Adopt panes present in `source` but missing from `target`: each joins the
  * group its source siblings map to in the target (first group as a last
  * resort). Layout changes never lose panes.
@@ -487,6 +595,8 @@ export function declareDefaultTree(tree: LayoutNode) {
 interface PaneDockHint {
   pane: string
   pos: DropPosition
+  /** Center docks: stack BEFORE this pane id (the strip divider's slot). */
+  before?: null | string
 }
 
 function adoptContributedPanes(): void {
@@ -535,7 +645,7 @@ function adoptContributedPanes(): void {
     const target = findGroupOfPane(next, anchor ?? '')?.id
 
     if (target) {
-      next = insertAtGroup(next, target, pane.id, dock?.pos ?? 'center') ?? next
+      next = insertAtGroup(next, target, pane.id, dock?.pos ?? 'center', dock?.before) ?? next
 
       // An adopted pane ARRIVES with its chip showing — a surprise zone with
       // zero chrome has no obvious handle to drag or close. (Explicit reveal;
@@ -834,7 +944,11 @@ export function resetLayoutTree() {
   saveUserPlaced(new Set())
   $layoutTree.set(defaultTree)
   markActivePreset('default')
-  // Plugin panes aren't in the declared default — re-adopt by placement.
+  // Owners PRE-PLACE their panes into the fresh default (session tiles stack
+  // into main as tabs) FIRST, so generic adoption sees them already in-tree
+  // and never scatters them to their old edges.
+  resetHandlers.forEach(fn => fn())
+  // Everything still missing (plugin panes) adopts by placement.
   adoptContributedPanes()
 }
 

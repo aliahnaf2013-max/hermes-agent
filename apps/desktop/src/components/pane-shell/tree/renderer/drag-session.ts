@@ -1,23 +1,41 @@
 /**
- * Pane drag session — the FancyZones engine (zones-engine.ts, ported
- * verbatim): sensitivity-radius hit testing, HighlightedZones state machine,
- * Shift = select-many (combined zone range), ClosestCenter primary on drop.
+ * THE in-app drag primitive. One pointer-capture session (`startDragSession`)
+ * owns the machinery every in-app drag shares — threshold, rAF-coalesced
+ * moves, cursor/user-select chrome, ghost chip, Esc-as-top-escape-layer,
+ * hint publishing, teardown — and a per-kind RESOLVER supplies the semantics:
+ * what the pointer is over (`resolveMove` → DropHint) and what a release
+ * does (`onCommit`). Pane/tab drags (below) are the first resolver; the
+ * sidebar session drag (app/chat/session-drag.ts) is the second. Native
+ * HTML5 DnD is reserved for true OS boundaries (Finder file drops) — in-app
+ * drags never ride it, so no snap-back animation, no hostile-library
+ * armor, and Esc aborts synchronously.
  *
- * Dragging is FancyZones-style: the LAYOUT STAYS FIXED and every zone lights
- * up as a whole-region drop target; NOTHING moves until release (tab reorder
- * included — the strip shows an insertion divider, not a live shuffle).
- * Esc aborts. Over a zone's TAB STRIP the drop stacks at the divider's slot;
- * elsewhere in the zone the radial position picks center/edge. Pointer-
- * capture based.
+ * Pane drags use the FancyZones engine (zones-engine.ts, ported verbatim):
+ * sensitivity-radius hit testing, HighlightedZones state machine, Shift =
+ * select-many (combined zone range), ClosestCenter primary on drop. The
+ * LAYOUT STAYS FIXED and every zone lights up as a whole-region drop target;
+ * NOTHING moves until release (tab reorder included — the strip shows an
+ * insertion divider, not a live shuffle). Over a zone's TAB STRIP the drop
+ * stacks at the divider's slot; elsewhere the radial position picks
+ * center/edge.
+ *
+ * PERFORMANCE CONTRACT: the layout never restructures mid-drag, so every
+ * rect a resolver needs is snapshotted once at drag start (zones AND tab
+ * strips) and each pointermove is pure math against those caches — no
+ * elementsFromPoint, no getBoundingClientRect, no style writes unless a
+ * value actually changed. Moves are coalesced to one hit-test per animation
+ * frame, with the pending move flushed synchronously on release so the drop
+ * commits at the exact final position.
  */
 
 import type { PointerEvent as ReactPointerEvent } from 'react'
 
+import { ESCAPE_PRIORITY, pushEscapeLayer } from '@/lib/escape-layers'
 import { reorderCommitHaptic, reorderStepHaptic } from '@/lib/reorder'
 
 import type { DropPosition } from '../model'
 import { $dropHint, $treeDragging, type DropHint, mergeTreeZones, moveTreePane, reorderTreePane } from '../store'
-import { type EngineZone, HighlightedZones, primaryZone } from '../zones-engine'
+import { type EngineZone, HighlightedZones, primaryZone, type ZoneRect } from '../zones-engine'
 
 const DRAG_THRESHOLD_PX = 4
 
@@ -63,45 +81,60 @@ export function subZonePosition(zones: EngineZone[], groupId: string, x: number,
   return rect ? radialPosition(rect, x, y) : 'center'
 }
 
-const stripFor = (groupId: string) =>
-  document.querySelector<HTMLElement>(`[data-zone-tabstrip="${CSS.escape(groupId)}"]`)
+/** One tab's insertion geometry: its pane id + horizontal midpoint. */
+interface StripSlot {
+  id: string
+  mid: number
+}
 
-/** Insertion slot within a strip from the pointer x against the OTHER tabs'
- *  midpoints: stack BEFORE the returned pane id (`null` = append). */
-function slotBefore(strip: HTMLElement, x: number, excludePaneId: string): { before: null | string } {
-  for (const tab of strip.querySelectorAll<HTMLElement>('[data-tree-tab]')) {
-    if (tab.dataset.treeTab === excludePaneId) {
+const stripSlots = (strip: HTMLElement): StripSlot[] =>
+  [...strip.querySelectorAll<HTMLElement>('[data-tree-tab]')].map(tab => {
+    const r = tab.getBoundingClientRect()
+
+    return { id: tab.dataset.treeTab ?? '', mid: r.left + r.width / 2 }
+  })
+
+/** Insertion slot from the pointer x against the OTHER tabs' midpoints:
+ *  stack BEFORE the returned pane id (`null` = append). */
+export function slotBefore(slots: StripSlot[], x: number, excludePaneId = ''): { before: null | string } {
+  for (const slot of slots) {
+    if (slot.id === excludePaneId) {
       continue
     }
 
-    const r = tab.getBoundingClientRect()
-
-    if (x < r.left + r.width / 2) {
-      return { before: tab.dataset.treeTab ?? null }
+    if (x < slot.mid) {
+      return { before: slot.id }
     }
   }
 
   return { before: null }
 }
 
-/** The insertion slot when the pointer is over `groupId`'s tab strip;
- *  `undefined` when it isn't. A drop on the strip STACKS at that slot — the
- *  strip is where tabs live, so it wins over the radial top-edge band that
- *  would otherwise read as "split top". */
-function stripSlotAt(
-  groupId: string,
-  x: number,
-  y: number,
-  excludePaneId: string
-): undefined | { before: null | string } {
-  const overStrip = document
-    .elementsFromPoint(x, y)
-    .some(el => el instanceof HTMLElement && el.closest(`[data-zone-tabstrip="${CSS.escape(groupId)}"]`) !== null)
-
-  const strip = overStrip ? stripFor(groupId) : null
-
-  return strip ? slotBefore(strip, x, excludePaneId) : undefined
+/** Drag-start snapshot of one zone's tab strip. Strips never overlap and the
+ *  layout never restructures mid-drag, so rect containment replaces a
+ *  per-move elementsFromPoint hit test. A drop on a strip STACKS at the
+ *  divider's slot — the strip is where tabs live, so it wins over the radial
+ *  top-edge band that would otherwise read as "split top". */
+export interface StripSnapshot {
+  groupId: string
+  rect: ZoneRect
+  slots: StripSlot[]
 }
+
+export function snapshotStrips(): StripSnapshot[] {
+  return [...document.querySelectorAll<HTMLElement>('[data-zone-tabstrip]')].map(el => {
+    const r = el.getBoundingClientRect()
+
+    return {
+      groupId: el.dataset.zoneTabstrip!,
+      rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom },
+      slots: stripSlots(el)
+    }
+  })
+}
+
+export const rectContains = (rect: ZoneRect, x: number, y: number, pad = 0) =>
+  x >= rect.left - pad && x <= rect.right + pad && y >= rect.top - pad && y <= rect.bottom + pad
 
 const sameHint = (a: DropHint | null, b: DropHint | null) =>
   a?.groupId === b?.groupId &&
@@ -111,17 +144,7 @@ const sameHint = (a: DropHint | null, b: DropHint | null) =>
   (a?.groupIds?.length ?? 0) === (b?.groupIds?.length ?? 0) &&
   (a?.groupIds ?? []).every((id, i) => b?.groupIds?.[i] === id)
 
-interface ReorderContext {
-  groupId: string
-  /** The tab-strip element; tabs carry `data-tree-tab={paneId}`. */
-  strip: HTMLElement
-}
-
-/** How far (px) the pointer may stray from the strip before a tab drag stops
- *  being a reorder and becomes a zone move (browser-tab tear-off feel). */
-const TEAR_OFF_SLACK_PX = 18
-
-/** Double-tap detection for drag handles. The drag session preventDefaults
+/** Double-tap detection for drag handles. Pane handles preventDefault
  *  pointerdown, which suppresses native `dblclick` — so rapid same-handle
  *  taps are detected here instead. */
 const DOUBLE_TAP_MS = 400
@@ -132,6 +155,268 @@ export interface DoubleTapContext {
   key: string
   onDoubleTap: () => void
 }
+
+// ---------------------------------------------------------------------------
+// The generic drag session (machinery) — resolvers plug in below / elsewhere.
+// ---------------------------------------------------------------------------
+
+export interface DragSessionSpec {
+  /** Movement crossed the drag threshold: snapshot geometry, set the drag
+   *  store(s), dim/mark the source. Runs once. */
+  onEngage(x: number, y: number): void
+  /** Per-frame target resolution — pure math against drag-start snapshots.
+   *  Returns the hint to publish; `null` = deny area (no-drop cursor, a
+   *  release commits nothing). */
+  resolveMove(x: number, y: number, shift: boolean): DropHint | null
+  /** Release over the final published hint (already flushed to the exact
+   *  release position). Only called for engaged drags. */
+  onCommit(hint: DropHint | null): void
+  /** Teardown for both commit and abort — undo whatever onEngage marked. */
+  onEnd?(): void
+  /** Sub-threshold release = a click on the handle. */
+  onTap?(): void
+  double?: DoubleTapContext
+  /** Floating chip following the pointer — for drags whose source doesn't
+   *  stay visibly "held" (a sidebar row, unlike a dimmed tab). */
+  ghost?: { label: string }
+}
+
+/** The engaged drag's ghost chip: plain DOM (no React), themed via the same
+ *  tokens as DropPill, moved with a transform — trivially cheap, and removal
+ *  on Esc is synchronous. */
+function createGhost(label: string): HTMLElement {
+  const ghost = document.createElement('div')
+
+  ghost.textContent = label
+  ghost.style.cssText =
+    'position:fixed;left:0;top:0;z-index:9999;pointer-events:none;max-width:16rem;overflow:hidden;' +
+    'text-overflow:ellipsis;white-space:nowrap;padding:0.25rem 0.75rem;border-radius:9999px;' +
+    'border:1px solid color-mix(in srgb,var(--dt-composer-ring) 45%,transparent);' +
+    'background:color-mix(in srgb,var(--dt-card) 92%,transparent);color:var(--ui-text-primary);' +
+    'font-size:0.75rem;font-weight:500;box-shadow:0 4px 16px rgba(0,0,0,0.25);will-change:transform'
+  document.body.appendChild(ghost)
+
+  return ghost
+}
+
+/** After an ENGAGED drag, the release still synthesizes a `click` on the
+ *  capture element — swallow exactly that one so a drag can never double as
+ *  an activation (row resume, tab close). Committed drags see the click in
+ *  the same task burst as pointerup; an Esc abort's click arrives with the
+ *  eventual release, so the trap disarms right after it. */
+function suppressDragClick(committed: boolean) {
+  const swallow = (ev: MouseEvent) => {
+    ev.preventDefault()
+    ev.stopPropagation()
+  }
+
+  window.addEventListener('click', swallow, { capture: true, once: true })
+
+  const disarm = () => window.setTimeout(() => window.removeEventListener('click', swallow, true), 0)
+
+  if (committed) {
+    disarm()
+  } else {
+    window.addEventListener('pointerup', disarm, { capture: true, once: true })
+    window.addEventListener('pointercancel', disarm, { capture: true, once: true })
+  }
+}
+
+/**
+ * Begin a drag session from a handle's pointerdown. A sub-threshold release
+ * is a click (`onTap` / `double.onDoubleTap`); past the threshold the spec's
+ * resolver owns targeting and the machinery owns everything else. Esc aborts
+ * instantly: the session registers as the TOP escape layer, tears down
+ * synchronously, and nothing commits.
+ */
+export function startDragSession(e: ReactPointerEvent<HTMLElement>, spec: DragSessionSpec) {
+  if (e.button !== 0) {
+    return
+  }
+
+  const handle = e.currentTarget
+  const { pointerId } = e
+  const sx = e.clientX
+  const sy = e.clientY
+  const restoreCursor = document.body.style.cursor
+  const restoreSelect = document.body.style.userSelect
+  let engaged = false
+  let releaseEscapeLayer: (() => void) | null = null
+  let ghost: HTMLElement | null = null
+  let cursor: string | null = null
+  // rAF-coalesced move processing: the raw handler only records the latest
+  // point; all hit testing happens at most once per frame.
+  let pending: { x: number; y: number; shift: boolean } | null = null
+  let raf = 0
+
+  // Cursor writes are per-frame; only touch the style when the value changes.
+  const setCursor = (value: string) => {
+    if (cursor !== value) {
+      cursor = value
+      document.body.style.cursor = value
+    }
+  }
+
+  const publishHint = (next: DropHint | null) => {
+    if (!sameHint($dropHint.get(), next)) {
+      if (next?.stack !== undefined && $dropHint.get()?.stack?.before !== next.stack.before) {
+        reorderStepHaptic()
+      }
+
+      $dropHint.set(next)
+    }
+  }
+
+  const engage = (x: number, y: number) => {
+    engaged = true
+
+    // Capture only once ENGAGED: pre-threshold pointer events must stay
+    // untouched so a plain click on the handle (and its children — a row
+    // body's own onClick) keeps working. Window-level listeners track the
+    // gesture either way.
+    try {
+      handle.setPointerCapture?.(pointerId)
+    } catch {
+      // Synthetic events (automation) have no active pointer.
+    }
+
+    setCursor('grabbing')
+    document.body.style.userSelect = 'none'
+    // While dragging, Esc belongs to the drag ALONE — lower layers (edit
+    // mode, overlays) must not also fire on the same press.
+    releaseEscapeLayer = pushEscapeLayer(ESCAPE_PRIORITY.drag)
+
+    if (spec.ghost) {
+      ghost = createGhost(spec.ghost.label)
+    }
+
+    spec.onEngage(x, y)
+  }
+
+  const processMove = (x: number, y: number, shift: boolean) => {
+    if (!engaged) {
+      if (Math.hypot(x - sx, y - sy) < DRAG_THRESHOLD_PX) {
+        return
+      }
+
+      engage(x, y)
+    }
+
+    if (ghost) {
+      ghost.style.transform = `translate3d(${x + 14}px, ${y + 12}px, 0)`
+    }
+
+    const hint = spec.resolveMove(x, y, shift)
+
+    // Over a deny area (no target — titlebar / statusbar / gutters /
+    // off-window) the release cancels; the cursor says so up front.
+    setCursor(hint ? 'grabbing' : 'no-drop')
+    publishHint(hint)
+  }
+
+  const flushMove = () => {
+    raf = 0
+
+    if (pending) {
+      const { shift, x, y } = pending
+      pending = null
+      processMove(x, y, shift)
+    }
+  }
+
+  const onMove = (ev: PointerEvent) => {
+    pending = { shift: ev.shiftKey, x: ev.clientX, y: ev.clientY }
+    raf ||= requestAnimationFrame(flushMove)
+  }
+
+  const finish = (commit: boolean) => {
+    if (raf) {
+      cancelAnimationFrame(raf)
+      raf = 0
+    }
+
+    // The drop must land at the FINAL pointer position, not the last painted
+    // frame's — flush the pending move before reading the hint. An abort
+    // (Esc / pointercancel) skips it: everything is discarded anyway.
+    if (commit) {
+      flushMove()
+    }
+
+    document.body.style.cursor = restoreCursor
+    document.body.style.userSelect = restoreSelect
+    ghost?.remove()
+    ghost = null
+    releaseEscapeLayer?.()
+    releaseEscapeLayer = null
+
+    try {
+      handle.releasePointerCapture?.(pointerId)
+    } catch {
+      // Mirror of the capture guard.
+    }
+
+    window.removeEventListener('pointermove', onMove, true)
+    window.removeEventListener('pointerup', onUp, true)
+    window.removeEventListener('pointercancel', onCancel, true)
+    window.removeEventListener('keydown', onKey, true)
+
+    if (engaged) {
+      suppressDragClick(commit)
+
+      if (commit) {
+        spec.onCommit($dropHint.get())
+      }
+    } else if (commit) {
+      const now = Date.now()
+
+      if (spec.double && lastTap?.key === spec.double.key && now - lastTap.time < DOUBLE_TAP_MS) {
+        lastTap = null
+        spec.double.onDoubleTap()
+      } else {
+        lastTap = spec.double ? { key: spec.double.key, time: now } : null
+        spec.onTap?.()
+      }
+    }
+
+    spec.onEnd?.()
+    $dropHint.set(null)
+    $treeDragging.set(null)
+  }
+
+  const onUp = () => finish(true)
+  const onCancel = () => finish(false)
+
+  // Esc aborts the drag — the target selection vanishes and nothing moves,
+  // the universal "never mind" for an in-flight drag. Capture-phase + stop so
+  // it doesn't also close a pane/overlay behind the drag (the escape layer
+  // covers contract-following handlers; the stop covers the rest).
+  const onKey = (ev: KeyboardEvent) => {
+    if (ev.key === 'Escape') {
+      ev.preventDefault()
+      ev.stopPropagation()
+      finish(false)
+    }
+  }
+
+  window.addEventListener('pointermove', onMove, true)
+  window.addEventListener('pointerup', onUp, true)
+  window.addEventListener('pointercancel', onCancel, true)
+  window.addEventListener('keydown', onKey, true)
+}
+
+// ---------------------------------------------------------------------------
+// Pane drag — the tree's resolver over the generic session.
+// ---------------------------------------------------------------------------
+
+interface ReorderContext {
+  groupId: string
+  /** The tab-strip element; tabs carry `data-tree-tab={paneId}`. */
+  strip: HTMLElement
+}
+
+/** How far (px) the pointer may stray from the strip before a tab drag stops
+ *  being a reorder and becomes a zone move (browser-tab tear-off feel). */
+const TEAR_OFF_SLACK_PX = 18
 
 /**
  * Begin a pane drag from any handle. A sub-threshold release is a click
@@ -158,222 +443,146 @@ export function startPaneDrag(
   e.preventDefault()
   e.stopPropagation()
 
-  const handle = e.currentTarget
-  const { pointerId } = e
-  const sx = e.clientX
-  const sy = e.clientY
-  const restoreCursor = document.body.style.cursor
-  const restoreSelect = document.body.style.userSelect
   const highlighted = new HighlightedZones()
   let zones: EngineZone[] = []
-  let lastPoint = { x: sx, y: sy }
-  let mode: 'idle' | 'reorder' | 'zone' = 'idle'
+  let strips: StripSnapshot[] = []
+  let mode: 'reorder' | 'zone' | null = null
   let dimmed: HTMLElement | null = null
 
-  try {
-    handle.setPointerCapture?.(pointerId)
-  } catch {
-    // Synthetic events (automation) have no active pointer.
-  }
-
-  const publishHint = (next: DropHint | null) => {
-    if (!sameHint($dropHint.get(), next)) {
-      if (next?.stack !== undefined && $dropHint.get()?.stack?.before !== next.stack.before) {
-        reorderStepHaptic()
-      }
-
-      $dropHint.set(next)
-    }
-  }
-
-  const startDragChrome = () => {
-    document.body.style.cursor = 'grabbing'
-    document.body.style.userSelect = 'none'
+  const markSource = () => {
     // The dragged tab dims for the drag's life — the divider says where it
     // GOES, the dim says what MOVES. No live shuffle (placement-on-release).
-    dimmed = reorder?.strip.querySelector<HTMLElement>(`[data-tree-tab="${CSS.escape(paneId)}"]`) ?? null
+    dimmed ??= reorder?.strip.querySelector<HTMLElement>(`[data-tree-tab="${CSS.escape(paneId)}"]`) ?? null
     dimmed?.style.setProperty('opacity', '0.45')
   }
 
   const enterZoneMode = () => {
     mode = 'zone'
-    // The layout never restructures mid-drag, so zone rects are stable.
+    // The layout never restructures mid-drag, so zone/strip rects are stable.
     zones = snapshotZones()
+    strips = snapshotStrips()
     $treeDragging.set(paneId)
-    startDragChrome()
+    markSource()
   }
 
-  const enterReorderMode = () => {
-    mode = 'reorder'
-    startDragChrome()
-  }
+  // The reorder strip's geometry, snapshotted on first use (same fixed-layout
+  // guarantee as the zone snapshots).
+  let reorderSnap: { rect: ZoneRect; slots: StripSlot[] } | null = null
 
-  const withinStrip = (x: number, y: number) => {
-    if (!reorder) {
-      return false
+  const reorderStrip = () => {
+    if (!reorderSnap) {
+      const r = reorder!.strip.getBoundingClientRect()
+      reorderSnap = {
+        rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom },
+        slots: stripSlots(reorder!.strip)
+      }
     }
 
-    const r = reorder.strip.getBoundingClientRect()
-
-    return (
-      x >= r.left - TEAR_OFF_SLACK_PX &&
-      x <= r.right + TEAR_OFF_SLACK_PX &&
-      y >= r.top - TEAR_OFF_SLACK_PX &&
-      y <= r.bottom + TEAR_OFF_SLACK_PX
-    )
+    return reorderSnap
   }
 
-  const onMove = (ev: PointerEvent) => {
-    lastPoint = { x: ev.clientX, y: ev.clientY }
+  const withinStrip = (x: number, y: number) =>
+    Boolean(reorder) && rectContains(reorderStrip().rect, x, y, TEAR_OFF_SLACK_PX)
 
-    if (mode === 'idle') {
-      if (Math.hypot(ev.clientX - sx, ev.clientY - sy) < DRAG_THRESHOLD_PX) {
-        return
-      }
+  startDragSession(e, {
+    double,
+    onTap,
 
-      if (reorder && withinStrip(ev.clientX, ev.clientY)) {
-        enterReorderMode()
+    onEngage(x, y) {
+      if (reorder && withinStrip(x, y)) {
+        mode = 'reorder'
+        markSource()
       } else {
         enterZoneMode()
       }
-    }
+    },
 
-    if (mode === 'reorder') {
-      if (!withinStrip(ev.clientX, ev.clientY)) {
+    resolveMove(x, y, shift) {
+      if (mode === 'reorder') {
+        if (withinStrip(x, y)) {
+          return {
+            kind: 'group',
+            groupId: reorder!.groupId,
+            groupIds: [reorder!.groupId],
+            pos: 'center',
+            stack: slotBefore(reorderStrip().slots, x, paneId)
+          }
+        }
+
         // Tear-off: the tab leaves the strip and becomes a zone move.
         enterZoneMode()
-      } else {
-        publishHint({
-          kind: 'group',
-          groupId: reorder!.groupId,
-          groupIds: [reorder!.groupId],
-          pos: 'center',
-          stack: slotBefore(reorder!.strip, ev.clientX, paneId)
-        })
-
-        return
       }
-    }
 
-    // The hint updates on highlight-set changes AND on sub-zone position
-    // changes (center/edge regions within the same primary zone).
-    highlighted.update(zones, lastPoint, ev.shiftKey)
-    let groupIds = [...highlighted.zones()]
+      // The hint updates on highlight-set changes AND on sub-zone position
+      // changes (center/edge regions within the same primary zone).
+      const point = { x, y }
+      highlighted.update(zones, point, shift)
+      let groupIds = [...highlighted.zones()]
 
-    // Spanning multiple zones is EXPLICIT (Shift). Without it, the seam-
-    // proximity capture (sensitivity radius grabs both neighbors near a
-    // shared edge) collapses to the primary zone — otherwise a drop near a
-    // seam silently merges zones the user never asked to merge.
-    if (!ev.shiftKey && groupIds.length > 1) {
-      const collapsed = primaryZone(zones, groupIds, lastPoint)
-      groupIds = collapsed ? [collapsed] : []
-    }
-
-    const groupId = groupIds.length > 0 ? (primaryZone(zones, groupIds, lastPoint) ?? undefined) : undefined
-
-    // Over the target's TAB STRIP the drop stacks at the divider's slot;
-    // sub-positions only make sense for a single-zone drop (a Shift-span
-    // always merges, pos ignored).
-    const stack =
-      groupIds.length === 1 && groupId ? stripSlotAt(groupId, lastPoint.x, lastPoint.y, paneId) : undefined
-
-    const pos: DropPosition = stack
-      ? 'center'
-      : groupIds.length === 1 && groupId
-        ? subZonePosition(zones, groupId, lastPoint.x, lastPoint.y)
-        : 'center'
-
-    const next: DropHint | null = groupIds.length > 0 ? { kind: 'group', groupId, groupIds, pos, stack } : null
-
-    // Over a deny area (no zone — titlebar / statusbar / gutters / off-window)
-    // the release cancels; the cursor says so up front. Every real zone is a
-    // valid target, so `grabbing` elsewhere.
-    document.body.style.cursor = next ? 'grabbing' : 'no-drop'
-
-    publishHint(next)
-  }
-
-  const finish = (commit: boolean) => {
-    document.body.style.cursor = restoreCursor
-    document.body.style.userSelect = restoreSelect
-    dimmed?.style.removeProperty('opacity')
-
-    try {
-      handle.releasePointerCapture?.(pointerId)
-    } catch {
-      // Mirror of the capture guard.
-    }
-
-    window.removeEventListener('pointermove', onMove, true)
-    window.removeEventListener('pointerup', onUp, true)
-    window.removeEventListener('pointercancel', onCancel, true)
-    window.removeEventListener('keydown', onKey, true)
-
-    const hint = $dropHint.get()
-
-    if (commit && mode === 'reorder' && reorder && hint?.stack !== undefined) {
-      // Slot -> index among the OTHER tabs (reorderPaneInGroup inserts there).
-      const others = [...reorder.strip.querySelectorAll<HTMLElement>('[data-tree-tab]')]
-        .map(el => el.dataset.treeTab)
-        .filter((id): id is string => Boolean(id) && id !== paneId)
-
-      const toIndex = hint.stack.before ? others.indexOf(hint.stack.before) : others.length
-
-      if (toIndex >= 0) {
-        reorderTreePane(reorder.groupId, paneId, toIndex)
-        reorderCommitHaptic()
+      // Spanning multiple zones is EXPLICIT (Shift). Without it, the seam-
+      // proximity capture (sensitivity radius grabs both neighbors near a
+      // shared edge) collapses to the primary zone — otherwise a drop near a
+      // seam silently merges zones the user never asked to merge.
+      if (!shift && groupIds.length > 1) {
+        const collapsed = primaryZone(zones, groupIds, point)
+        groupIds = collapsed ? [collapsed] : []
       }
-    }
 
-    if (commit && mode === 'zone') {
-      // Drop what the hint SHOWS — the overlay and the commit share one truth
-      // (the raw highlight set can hold both seam neighbors; the hint already
-      // collapsed that to the primary unless Shift made the span explicit).
-      const targets = hint?.groupIds ?? []
+      const groupId = groupIds.length > 0 ? (primaryZone(zones, groupIds, point) ?? undefined) : undefined
 
-      if (targets.length > 1) {
-        // Shift-span: merge the highlighted zones, dropping the pane across them.
-        mergeTreeZones([...targets], paneId, hint?.groupId ?? null)
-      } else if (hint?.groupId) {
-        // strip = stack at the divider slot; center = join the stack;
-        // an edge = split the zone and land there.
-        moveTreePane(paneId, { groupId: hint.groupId, pos: hint.pos ?? 'center', before: hint.stack?.before })
+      // Over the target's TAB STRIP the drop stacks at the divider's slot;
+      // sub-positions only make sense for a single-zone drop (a Shift-span
+      // always merges, pos ignored).
+      const strip =
+        groupIds.length === 1 && groupId ? strips.find(s => s.groupId === groupId && rectContains(s.rect, x, y)) : null
+
+      const stack = strip ? slotBefore(strip.slots, x, paneId) : undefined
+
+      const pos: DropPosition = stack
+        ? 'center'
+        : groupIds.length === 1 && groupId
+          ? subZonePosition(zones, groupId, x, y)
+          : 'center'
+
+      return groupIds.length > 0 ? { kind: 'group', groupId, groupIds, pos, stack } : null
+    },
+
+    onCommit(hint) {
+      if (mode === 'reorder' && reorder && hint?.stack !== undefined) {
+        // Slot -> index among the OTHER tabs (reorderPaneInGroup inserts there).
+        const others = [...reorder.strip.querySelectorAll<HTMLElement>('[data-tree-tab]')]
+          .map(el => el.dataset.treeTab)
+          .filter((id): id is string => Boolean(id) && id !== paneId)
+
+        const toIndex = hint.stack.before ? others.indexOf(hint.stack.before) : others.length
+
+        if (toIndex >= 0) {
+          reorderTreePane(reorder.groupId, paneId, toIndex)
+          reorderCommitHaptic()
+        }
       }
-    }
 
-    if (mode === 'idle' && commit) {
-      const now = Date.now()
+      if (mode === 'zone') {
+        // Drop what the hint SHOWS — the overlay and the commit share one
+        // truth (the raw highlight set can hold both seam neighbors; the hint
+        // already collapsed that to the primary unless Shift made the span
+        // explicit).
+        const targets = hint?.groupIds ?? []
 
-      if (double && lastTap?.key === double.key && now - lastTap.time < DOUBLE_TAP_MS) {
-        lastTap = null
-        double.onDoubleTap()
-      } else {
-        lastTap = double ? { key: double.key, time: now } : null
-        onTap?.()
+        if (targets.length > 1) {
+          // Shift-span: merge the highlighted zones, dropping the pane across them.
+          mergeTreeZones([...targets], paneId, hint?.groupId ?? null)
+        } else if (hint?.groupId) {
+          // strip = stack at the divider slot; center = join the stack;
+          // an edge = split the zone and land there.
+          moveTreePane(paneId, { groupId: hint.groupId, pos: hint.pos ?? 'center', before: hint.stack?.before })
+        }
       }
+    },
+
+    onEnd() {
+      dimmed?.style.removeProperty('opacity')
+      highlighted.reset()
     }
-
-    highlighted.reset()
-    $dropHint.set(null)
-    $treeDragging.set(null)
-  }
-
-  const onUp = () => finish(true)
-  const onCancel = () => finish(false)
-
-  // Esc aborts the drag — the zone selection vanishes and nothing moves, the
-  // universal "never mind" for an in-flight drag. Capture-phase + stop so it
-  // doesn't also close a pane/overlay behind the drag.
-  const onKey = (ev: KeyboardEvent) => {
-    if (ev.key === 'Escape') {
-      ev.preventDefault()
-      ev.stopPropagation()
-      finish(false)
-    }
-  }
-
-  window.addEventListener('pointermove', onMove, true)
-  window.addEventListener('pointerup', onUp, true)
-  window.addEventListener('pointercancel', onCancel, true)
-  window.addEventListener('keydown', onKey, true)
+  })
 }

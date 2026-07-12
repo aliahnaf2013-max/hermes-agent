@@ -40,7 +40,6 @@ import {
   splitTreeZone,
   toggleTreeGroupMinimized
 } from '../store'
-import { FADE_IN_DURATION_MILLIS } from '../zones-engine'
 
 import { type DoubleTapContext, startPaneDrag } from './drag-session'
 import { paneChrome } from './track-model'
@@ -522,6 +521,11 @@ function StripDropCaret({ groupId, stripRef }: { groupId: string; stripRef: RefO
 // FancyZones drop overlay
 // ---------------------------------------------------------------------------
 
+/** Overlay entry fade. FancyZones ships 200ms (FADE_IN_DURATION_MILLIS in
+ *  zones-engine); on a drag that starts under the cursor that ramp reads as
+ *  lag, so the sheets snap in far faster — same softening, instant feel. */
+const OVERLAY_FADE_MS = 80
+
 /** Sheet inset from the zone edge (px). */
 const REGION_PAD = 6
 
@@ -563,14 +567,11 @@ function ZoneDropOverlay({ isEmpty, node }: { isEmpty: boolean; node: GroupNode 
     return null
   }
 
-  // A session drag (sidebar row) reuses this exact overlay, but only over
-  // zones that host a chat surface — a session never lands next to the sidebar
-  // or terminal.
+  // A session drag (sidebar row) reuses this exact overlay — over ANY zone
+  // now (stack into its tabs / split its edges); only a CHAT zone's center is
+  // a link-to-chat (the composer overlay owns that visual).
   const sessionDrag = dragging === SESSION_TILE_DRAG
-
-  if (sessionDrag && !node.panes.some(p => p === 'workspace' || p.startsWith('session-tile:'))) {
-    return null
-  }
+  const chatZone = node.panes.some(p => p === 'workspace' || p.startsWith('session-tile:'))
 
   const isDragSource = node.panes.includes(dragging)
 
@@ -591,10 +592,11 @@ function ZoneDropOverlay({ isEmpty, node }: { isEmpty: boolean; node: GroupNode 
   const multi = (hint?.groupIds?.length ?? 0) > 1
   // Sub-positions only exist for a single-zone target (a Shift-span merges).
   const pos = primary && !multi ? (hint?.pos ?? 'center') : 'center'
-  // Session drag over a zone's CENTER: the "link to chat" overlay inside the
-  // surface (ChatDropOverlay — the same sheet + pill) owns that region; this
-  // sheet fades out so the two never stack. Edges behave exactly like a tab.
-  const centerLink = sessionDrag && primary && pos === 'center'
+  // Session drag over a CHAT zone's CENTER: the "link to chat" overlay inside
+  // the surface (ChatDropOverlay — the same sheet + pill) owns that region;
+  // this sheet fades out so the two never stack. A non-chat zone's center has
+  // no chat to link, so it shows the normal stack sheet. Edges act like a tab.
+  const centerLink = sessionDrag && primary && pos === 'center' && chatZone
 
   const pill =
     !primary || centerLink
@@ -610,12 +612,16 @@ function ZoneDropOverlay({ isEmpty, node }: { isEmpty: boolean; node: GroupNode 
   return (
     <div
       className="pointer-events-none absolute inset-0 z-40"
-      style={{ animation: `hermes-zone-fade ${FADE_IN_DURATION_MILLIS}ms linear both` }}
+      style={{ animation: `hermes-zone-fade ${OVERLAY_FADE_MS}ms linear both` }}
     >
       <div
         className={cn(
           DROP_SHEET_CLASS,
-          'absolute flex items-center justify-center transition-all duration-150 ease-out',
+          // Transition ONLY the box + colors. `transition-all` also animated
+          // backdrop-filter, and a blur interpolating while the insets glide
+          // re-blurs half a zone every frame — the single most expensive
+          // paint in the whole drag.
+          'absolute flex items-center justify-center transition-[top,right,bottom,left,background-color,border-color,opacity] duration-150 ease-out',
           // Blur only the live target — idle outlines must not fog the app.
           active && !centerLink && DROP_SHEET_BLUR_CLASS,
           centerLink && 'opacity-0'

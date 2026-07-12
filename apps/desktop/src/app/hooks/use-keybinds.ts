@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 
 import { $terminalTakeover, setTerminalTakeover } from '@/app/right-sidebar/store'
 import { closeActiveTerminal, createTerminal, cycleTerminal } from '@/app/right-sidebar/terminal/terminals'
+import { closeActiveTab } from '@/app/chat/close-tab'
 import { layoutHasRootSide } from '@/components/pane-shell/tree/store'
 import { contributedKeybindHandler, PROFILE_SLOT_COUNT, SESSION_SLOT_COUNT } from '@/lib/keybinds/actions'
 import { comboAllowedInInput, comboFromEvent, isEditableTarget } from '@/lib/keybinds/combo'
@@ -166,6 +167,11 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     'view.prevTerminal': () => $terminalTakeover.get() && cycleTerminal(-1),
     'view.closeTerminal': () => $terminalTakeover.get() && closeActiveTerminal(),
     'view.flipPanes': togglePanesFlipped,
+    // ⌘W: close the focused tab (terminal / preview target / zone tree tab).
+    // On macOS the menu accelerator owns ⌘W and routes through the same
+    // closeActiveTab via IPC (see use-desktop-integrations); this binding is
+    // the Win/Linux path where ⌘W reaches the renderer directly.
+    'view.closeTab': () => void closeActiveTab(),
 
     'appearance.toggleMode': () => setMode(resolvedMode === 'dark' ? 'light' : 'dark'),
 

@@ -11,7 +11,7 @@ import type { ReactNode } from 'react'
 
 import { registerPaneCloser, removeTreePane } from '@/components/pane-shell/tree/store'
 import { registry } from '@/contrib/registry'
-import type { SplitDir } from '@/store/session-states'
+import type { TileDock } from '@/store/session-states'
 
 export interface PaneMirror<T> {
   /** Reactive source list. */
@@ -22,10 +22,12 @@ export interface PaneMirror<T> {
   key: (tile: T) => string
   /** Pane-id namespace — the id is `${prefix}:${key}`. */
   prefix: string
-  /** Edge to dock against on adoption (default right). */
-  dir?: (tile: T) => SplitDir | undefined
+  /** Dock on adoption (default right; `center` = stack into anchor's zone). */
+  dir?: (tile: T) => TileDock | undefined
   /** Pane to dock against (default `workspace`) — a drop's target zone. */
   anchor?: (tile: T) => string | undefined
+  /** Center docks: the strip slot (stack before this pane id). */
+  before?: (tile: T) => null | string | undefined
   minWidth: string
   title: (key: string) => string
   render: (key: string) => ReactNode
@@ -58,7 +60,7 @@ export function paneMirror<T>(cfg: PaneMirror<T>): () => void {
         area: 'panes',
         title,
         data: {
-          dock: { pane: cfg.anchor?.(tile) ?? 'workspace', pos: cfg.dir?.(tile) ?? 'right' },
+          dock: { before: cfg.before?.(tile), pane: cfg.anchor?.(tile) ?? 'workspace', pos: cfg.dir?.(tile) ?? 'right' },
           minWidth: cfg.minWidth,
           placement: 'main'
         },

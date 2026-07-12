@@ -115,6 +115,10 @@ export const KEYBIND_ACTIONS: readonly KeybindActionMeta[] = [
   { id: 'view.closeTerminal', category: 'view', defaults: ['ctrl+shift+w'] },
   // ⌘\ — the backslash reads like a mirror line flipping the layout.
   { id: 'view.flipPanes', category: 'view', defaults: ['mod+\\'] },
+  // ⌘W closes the focused zone's active tab — its own tab strip (preview) or
+  // the tree tab (session tiles, files, terminal). The uncloseable workspace
+  // is a no-op.
+  { id: 'view.closeTab', category: 'view', defaults: ['mod+w'] },
   { id: 'appearance.toggleMode', category: 'view', defaults: ['shift+x'] },
   { id: 'keybinds.openPanel', category: 'view', defaults: ['mod+/'] }
 ]
@@ -198,6 +202,5 @@ export const KEYBIND_READONLY: readonly KeybindReadonly[] = [
   { id: 'composer.history', category: 'composer', keys: ['up', 'down'] },
   { id: 'composer.cancel', category: 'composer', keys: ['escape'] },
   // Fixed, context-local shortcuts surfaced for discoverability.
-  { id: 'view.terminalSelection', category: 'view', keys: ['mod+l'] },
-  { id: 'view.closePreviewTab', category: 'view', keys: ['mod+w'] }
+  { id: 'view.terminalSelection', category: 'view', keys: ['mod+l'] }
 ]
