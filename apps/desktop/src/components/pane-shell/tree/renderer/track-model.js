@@ -1,0 +1,157 @@
+/**
+ * The TRACK MODEL — how a layout node resolves its size along a split axis.
+ *
+ * A node is a FIXED track when it resolves to a CSS length (sidebars keep
+ * their declared size) and a FLEX track when it doesn't (weight-shared
+ * leftover). Everything here is pure geometry over the layout tree + the
+ * live pane contributions; the React split renderer reads it per render.
+ */
+import { allPaneIds } from '../model';
+export const MIN_PANE_PX = 80;
+export const paneChrome = (c) => (c?.data ?? {});
+/** Resolve a computed style length ("237px" / "none" / "auto") to px. */
+export function computedPx(value, fallback) {
+    const n = Number.parseFloat(value);
+    return Number.isFinite(n) ? n : fallback;
+}
+/** Resolve an AUTHORED CSS length ("237px", "38vh", "clamp(18rem,36vw,32rem)")
+ *  to px by measuring a probe inside `container` — handles every unit and
+ *  math function the browser does. */
+export function resolveCssPx(container, css, horizontal) {
+    if (typeof css === 'number') {
+        return css;
+    }
+    const probe = document.createElement('div');
+    probe.style.position = 'absolute';
+    probe.style.visibility = 'hidden';
+    probe.style.pointerEvents = 'none';
+    if (horizontal) {
+        probe.style.width = css;
+    }
+    else {
+        probe.style.height = css;
+    }
+    container.appendChild(probe);
+    const rect = probe.getBoundingClientRect();
+    probe.remove();
+    const px = horizontal ? rect.width : rect.height;
+    return Number.isFinite(px) && px > 0 ? px : null;
+}
+/** A group's panes that are actually on screen (not hidden / narrow-collapsed
+ *  / unregistered). The one place the "shown" filter lives. */
+export const shownPaneIds = (group, ctx) => group.panes.filter(id => !ctx.paneGone(id));
+/** max() of the defined CSS lengths (deduped); undefined when none — the
+ *  largest-tenant basis a fixed stack and its clamps both size from. */
+export const cssMax = (values) => {
+    const unique = [...new Set(values.filter((v) => Boolean(v)))];
+    return unique.length === 0 ? undefined : unique.length === 1 ? unique[0] : `max(${unique.join(', ')})`;
+};
+/**
+ * THE TRACK MODEL. A node's size along `axis` is FIXED when it resolves to a
+ * CSS length, and FLEX (weight-shared leftover) when null:
+ *
+ *  - zone: the max() of its shown panes' declared `width`/`height` (a live px
+ *    override from a sash drag wins) — sidebars keep their size, main flexes,
+ *    and the zone never resizes when tabs switch or a drop fronts a pane.
+ *  - split ALONG the axis: the sum of its visible children — fixed only when
+ *    every child is (one flex child makes the run flex).
+ *  - split ACROSS the axis: the max of its visible fixed children (flex
+ *    children just stretch to the container); flex only when none are fixed.
+ *
+ * This is how "two right sidebars over a terminal row" sizes itself from its
+ * content (237px, or 474px when review is visible) instead of taking a
+ * fraction of the window.
+ */
+/** A minimized zone IS its strip: the vertical rail (row) / header (column)
+ *  are both 28px thick. */
+export const MINIMIZED_TRACK = '1.75rem';
+export function fixedTrackSize(node, axis, ctx) {
+    if (node.type === 'group') {
+        // Ancestor splits must size a minimized zone as its strip, not as its
+        // panes' declared widths — otherwise the outer track keeps reserving the
+        // full sidebar width and the collapsed rail floats in a dead column.
+        if (node.minimized) {
+            return MINIMIZED_TRACK;
+        }
+        const overrideKey = axis === 'row' ? 'widthOverride' : 'heightOverride';
+        const declared = (id) => {
+            const sizing = (ctx.paneFor(id)?.data ?? {});
+            const css = (axis === 'row' ? sizing.width : sizing.height) ?? null;
+            const override = ctx.overrides[id]?.[overrideKey];
+            // An override only refines a pane that DECLARES a size along this axis
+            // (sash drags write overrides to fixed zones only). One without a
+            // declaration is stale data from another surface — honoring it would
+            // turn a flex-at-heart zone (main!) into a fixed track and hand the
+            // whole leftover to the run's absorber.
+            if (css !== null && override !== undefined) {
+                return `${override}px`;
+            }
+            return css;
+        };
+        // A zone is a fixed track only when EVERY shown pane sizes itself along
+        // the axis (a pure sidebar stack). Mixing a sidebar pane into a flex
+        // zone (files fronted in the Focus mono-stack) must NOT snap the whole
+        // zone to sidebar width — the flex pane keeps the zone flex.
+        const sizes = shownPaneIds(node, ctx).map(declared);
+        if (sizes.length === 0 || sizes.some(size => size === null)) {
+            return null;
+        }
+        // A STACK sizes to its LARGEST tenant (CSS max()), never the active tab:
+        // dropping a pane into a zone — the drop fronts it — or switching tabs
+        // must not resize the container (dropping sessions into a wider fixed
+        // zone used to snap the whole zone down to sidebar width).
+        return cssMax(sizes) ?? null;
+    }
+    const visible = node.children.filter(child => !subtreeGone(child, ctx));
+    const sizes = visible.map(child => fixedTrackSize(child, axis, ctx));
+    if (node.orientation === axis) {
+        if (sizes.length === 0 || sizes.some(size => size === null)) {
+            return null;
+        }
+        return sizes.length === 1 ? sizes[0] : `calc(${sizes.join(' + ')})`;
+    }
+    // Across the axis a flex child just stretches; the fixed ones set the size.
+    return cssMax(sizes) ?? null;
+}
+/** True when every pane in the subtree is hidden/narrow-collapsed. */
+export function subtreeGone(node, ctx) {
+    const ids = allPaneIds(node);
+    return ids.length > 0 && ids.every(ctx.paneGone);
+}
+/**
+ * Which chrome toggle owns a root-row child — SEMANTIC, not positional:
+ * ⌘B is the sessions/nav column (any `placement: 'left'` pane) wherever a
+ * flip or drag puts it; ⌘J is every other side column. `null` = contains
+ * the main zone, never side-collapsed. This is what keeps the titlebar
+ * toggles and reveals 100% main-compatible through ⌘\ flips.
+ */
+export function rootChildSide(child, paneFor) {
+    const placements = allPaneIds(child).map(id => paneChrome(paneFor(id)).placement);
+    if (placements.includes('main')) {
+        return null;
+    }
+    return placements.includes('left') ? 'left' : 'right';
+}
+/**
+ * The FIXED zone that owns `edge` of this subtree along `axis` — the zone a
+ * sash on that boundary actually resizes (dragging the seam between main and
+ * a nested right section resizes the section's edge sidebar, VS Code-style).
+ */
+export function edgeFixedZone(node, edge, axis, ctx) {
+    if (node.type === 'group') {
+        return fixedTrackSize(node, axis, ctx) !== null ? node : null;
+    }
+    const visible = node.children.filter(child => !subtreeGone(child, ctx));
+    if (node.orientation === axis) {
+        const child = edge === 'start' ? visible[0] : visible[visible.length - 1];
+        return child ? edgeFixedZone(child, edge, axis, ctx) : null;
+    }
+    // Cross-axis: every child touches the edge — the first fixed one owns it.
+    for (const child of visible) {
+        const zone = edgeFixedZone(child, edge, axis, ctx);
+        if (zone) {
+            return zone;
+        }
+    }
+    return null;
+}

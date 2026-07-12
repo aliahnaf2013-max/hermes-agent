@@ -39,8 +39,7 @@ import {
   setSessionStartedAt,
   setSessionsTotal,
   setTurnStartedAt,
-  setYoloActive,
-  workspaceCwdForNewSession
+  setYoloActive
 } from '@/store/session'
 import { closeSessionTile, dropSessionState, openSessionTile, patchSessionTile, publishSessionState, type SplitDir } from '@/store/session-states'
 import { broadcastSessionsChanged } from '@/store/session-sync'
@@ -194,7 +193,9 @@ export function useSessionActions({
       creatingSessionRef.current = true
 
       try {
-        const params = await desktopSessionCreateParams($currentCwd.get().trim() || workspaceCwdForNewSession())
+        // Main's #58241: the cwd fallback is resolveNewSessionCwd (project-aware),
+        // not the workspace helper — a project's new session keeps its repo cwd.
+        const params = await desktopSessionCreateParams($currentCwd.get().trim() || resolveNewSessionCwd())
         const created = await requestGateway<SessionCreateResponse>('session.create', params)
         const stored = created.stored_session_id ?? null
 
@@ -283,7 +284,7 @@ export function useSessionActions({
       try {
         // Fresh tile → the resolved new-session cwd (project/default), not the
         // primary composer's live cwd.
-        const params = await desktopSessionCreateParams(resolveNewSessionCwd().trim() || workspaceCwdForNewSession())
+        const params = await desktopSessionCreateParams(resolveNewSessionCwd().trim())
         const created = await requestGateway<SessionCreateResponse>('session.create', params)
         const stored = created.stored_session_id
 

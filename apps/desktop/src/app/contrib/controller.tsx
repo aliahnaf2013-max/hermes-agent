@@ -49,7 +49,6 @@ import { $currentCwd } from '@/store/session'
 
 import { watchRouteTiles } from '../chat/route-tile'
 import { stackSessionTilesIntoMain, watchSessionTiles } from '../chat/session-tile'
-import { SessionTileDropBridge } from '../chat/session-tile-drop-bridge'
 import { $terminalTakeover, setTerminalTakeover } from '../right-sidebar/store'
 
 import { FilesPane, LogsPane, PreviewRailPane, ReviewPaneContent } from './panes'
@@ -533,12 +532,6 @@ export function ContribController() {
           </div>
 
           <LayoutTreeRoot />
-
-          {/* Session → main-area tiling drop. A global singleton (window drag
-              listeners) — mounted here at the always-present shell root, NOT
-              inside a chat surface, so it can't miss a drag when the primary
-              view is mid-mount. */}
-          <SessionTileDropBridge />
 
           {/* The REAL statusbar (model pill, command center, agents, …) with
               statusBar.left/right contributions merged in. */}

@@ -1,45 +1,34 @@
 import { type DragEvent as ReactDragEvent, useCallback, useRef, useState } from 'react'
 
-import {
-  dragHasAttachments,
-  dragHasSession,
-  readSessionDrag,
-  type SessionDragPayload
-} from '@/app/chat/composer/inline-refs'
+import { dragHasAttachments } from '@/app/chat/composer/inline-refs'
 
 import { type DroppedFile, extractDroppedFiles, HERMES_PATHS_MIME } from './use-composer-actions'
 
+/** `'session'` is set by callers from the pointer drag session's store —
+ *  native drags only ever resolve to `'files'` here (sessions left native
+ *  DnD; see session-drag.ts). */
 export type DragKind = 'files' | 'session' | null
 
-const dragKindOf = (event: ReactDragEvent): DragKind => {
-  if (dragHasSession(event.dataTransfer)) {
-    return 'session'
-  }
-
-  if (dragHasAttachments(event.dataTransfer, HERMES_PATHS_MIME)) {
-    return 'files'
-  }
-
-  return null
-}
+const dragKindOf = (event: ReactDragEvent): DragKind =>
+  dragHasAttachments(event.dataTransfer, HERMES_PATHS_MIME) ? 'files' : null
 
 interface FileDropZoneOptions {
   /** When false the zone ignores drags entirely. */
   enabled?: boolean
   onDropFiles: (files: DroppedFile[]) => void
-  onDropSession?: (session: SessionDragPayload) => void
 }
 
 /**
- * "Drop anywhere in this region" affordance for files *and* in-app session
- * links. An enter/leave depth counter keeps nested children from flickering the
+ * "Drop anywhere in this region" affordance for FILE drags — the one drag
+ * kind still on native DnD (Finder/OS drops and the project tree must be).
+ * An enter/leave depth counter keeps nested children from flickering the
  * active state; `onDropCapture` clears it even when a nested target (the
  * composer) handles the drop and stops propagation before our bubble-phase
  * `onDrop` would fire.
  *
  * Spread `dropHandlers` onto the container; render an overlay off `dragKind`.
  */
-export function useFileDropZone({ enabled = true, onDropFiles, onDropSession }: FileDropZoneOptions) {
+export function useFileDropZone({ enabled = true, onDropFiles }: FileDropZoneOptions) {
   const [dragKind, setDragKind] = useState<DragKind>(null)
   const depth = useRef(0)
 
@@ -89,9 +78,8 @@ export function useFileDropZone({ enabled = true, onDropFiles, onDropSession }: 
         return
       }
 
-      // An outer layer (the session-tiling bridge) may have already claimed
-      // this drop via preventDefault — reset the hover state but don't ALSO
-      // act on it (a split drop must not insert a link).
+      // An outer layer may have already claimed this drop via preventDefault —
+      // reset the hover state but don't ALSO act on it.
       const claimed = event.defaultPrevented
 
       event.preventDefault()
@@ -101,23 +89,13 @@ export function useFileDropZone({ enabled = true, onDropFiles, onDropSession }: 
         return
       }
 
-      if (kind === 'session') {
-        const session = readSessionDrag(event.dataTransfer)
-
-        if (session) {
-          onDropSession?.(session)
-        }
-
-        return
-      }
-
       const files = extractDroppedFiles(event.dataTransfer)
 
       if (files.length) {
         onDropFiles(files)
       }
     },
-    [enabled, onDropFiles, onDropSession, reset]
+    [enabled, onDropFiles, reset]
   )
 
   return {
