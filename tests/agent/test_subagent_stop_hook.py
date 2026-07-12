@@ -54,10 +54,14 @@ def _fresh_plugin_manager():
 
 
 @pytest.fixture(autouse=True)
-def _stub_child_builder(monkeypatch):
+def _stub_child_builder(monkeypatch, request):
     """Replace _build_child_agent with a MagicMock factory so delegate_task
     never transitively imports run_agent / openai.  Keeps the test runnable
     in environments without heavyweight runtime deps installed."""
+    if request.node.get_closest_marker("real_child_builder"):
+        yield
+        return
+
     def _fake_build_child(task_index, **kwargs):
         child = MagicMock()
         child._delegate_saved_tool_names = []
@@ -67,6 +71,7 @@ def _stub_child_builder(monkeypatch):
     monkeypatch.setattr(
         "tools.delegate_tool._build_child_agent", _fake_build_child,
     )
+    yield
 
 
 def _register_capturing_hook():
@@ -135,6 +140,29 @@ class TestSingleTask:
             )
 
         assert captured[0]["parent_session_id"] == "sess-xyz"
+
+    def test_payload_includes_stable_child_subagent_id(self):
+        captured = _register_capturing_hook()
+        child = MagicMock()
+        child._delegate_saved_tool_names = []
+        child._credential_pool = None
+        child._subagent_id = "subagent-stable-1"
+        with patch("tools.delegate_tool._build_child_agent", return_value=child), patch(
+            "tools.delegate_tool._run_single_child"
+        ) as mock_run:
+            mock_run.return_value = {
+                "task_index": 0, "status": "completed", "summary": "x",
+                "api_calls": 1, "duration_seconds": 0.1, "_child_role": "qa",
+            }
+            delegate_task(goal="go", parent_agent=_make_parent())
+        assert captured[0]["child_subagent_id"] == "subagent-stable-1"
+
+
+@pytest.mark.real_child_builder
+def test_required_start_ack_fails_closed(monkeypatch):
+    monkeypatch.setenv("HERMES_REQUIRE_SUBAGENT_LIFECYCLE_ACK", "1")
+    with pytest.raises(RuntimeError, match="subagent_lifecycle_start_not_acknowledged"):
+        delegate_task(goal="must not run", parent_agent=_make_parent())
 
 
 # ── batch mode ────────────────────────────────────────────────────────────

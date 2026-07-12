@@ -1453,7 +1453,7 @@ def _build_child_agent(
 
     try:
         from hermes_cli.plugins import invoke_hook as _invoke_hook
-        _invoke_hook(
+        lifecycle_results = _invoke_hook(
             "subagent_start",
             parent_session_id=getattr(parent_agent, "session_id", None),
             parent_turn_id=getattr(parent_agent, "_current_turn_id", "") or "",
@@ -1463,7 +1463,16 @@ def _build_child_agent(
             child_role=effective_role,
             child_goal=goal,
         )
+        if is_truthy_value(os.environ.get("HERMES_REQUIRE_SUBAGENT_LIFECYCLE_ACK")):
+            acknowledged = any(
+                isinstance(item, dict) and item.get("ok") is True
+                for item in (lifecycle_results or [])
+            )
+            if not acknowledged:
+                raise RuntimeError("subagent_lifecycle_start_not_acknowledged")
     except Exception:
+        if is_truthy_value(os.environ.get("HERMES_REQUIRE_SUBAGENT_LIFECYCLE_ACK")):
+            raise
         logger.debug("subagent_start hook invocation failed", exc_info=True)
 
     return child
@@ -2833,6 +2842,7 @@ def delegate_task(
                     parent_session_id=_parent_session_id,
                     parent_turn_id=getattr(parent_agent, "_current_turn_id", "") or "",
                     child_session_id=getattr(_child_agent, "session_id", None),
+                    child_subagent_id=getattr(_child_agent, "_subagent_id", None),
                     child_role=child_role,
                     child_summary=entry.get("summary"),
                     child_status=entry.get("status"),
