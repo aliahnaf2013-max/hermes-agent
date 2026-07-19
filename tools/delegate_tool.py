@@ -53,6 +53,28 @@ DELEGATE_BLOCKED_TOOLS = frozenset(
     ]
 )
 
+# Required acknowledgement contract for governed subagent lifecycle delivery.
+# This is deliberately producer-specific: hook results are aggregated across
+# every installed plugin, so an unqualified {"ok": true} must never authorize
+# a child when the durable lifecycle producer failed.
+SUBAGENT_LIFECYCLE_ACK_PRODUCER = "pulse-agent-hub-lifecycle/v1"
+
+
+def _lifecycle_start_acknowledged(
+    results: Any, *, child_subagent_id: str, lifecycle_event_id: str,
+) -> bool:
+    """Return true only for the expected producer's exact start-event ACK."""
+    return any(
+        isinstance(item, dict)
+        and item.get("schema_version") == 1
+        and item.get("ok") is True
+        and item.get("producer") == SUBAGENT_LIFECYCLE_ACK_PRODUCER
+        and item.get("event") == "start"
+        and item.get("child_subagent_id") == child_subagent_id
+        and item.get("lifecycle_event_id") == lifecycle_event_id
+        for item in (results or [])
+    )
+
 
 # ---------------------------------------------------------------------------
 # Subagent approval callbacks
@@ -1381,6 +1403,7 @@ def _build_child_agent(
 
     try:
         from hermes_cli.plugins import invoke_hook as _invoke_hook
+        _lifecycle_event_id = f"subagent-start:{subagent_id}"
         _lifecycle_results = _invoke_hook(
             "subagent_start",
             parent_session_id=getattr(parent_agent, "session_id", None),
@@ -1390,11 +1413,13 @@ def _build_child_agent(
             child_subagent_id=subagent_id,
             child_role=effective_role,
             child_goal=goal,
+            lifecycle_event_id=_lifecycle_event_id,
         )
         if is_truthy_value(os.environ.get("HERMES_REQUIRE_SUBAGENT_LIFECYCLE_ACK")):
-            acknowledged = any(
-                isinstance(item, dict) and item.get("ok") is True
-                for item in (_lifecycle_results or [])
+            acknowledged = _lifecycle_start_acknowledged(
+                _lifecycle_results,
+                child_subagent_id=subagent_id,
+                lifecycle_event_id=_lifecycle_event_id,
             )
             if not acknowledged:
                 raise RuntimeError("subagent_lifecycle_start_not_acknowledged")

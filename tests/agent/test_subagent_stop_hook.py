@@ -15,7 +15,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tools.delegate_tool import _build_child_agent, delegate_task
+from tools.delegate_tool import (
+    SUBAGENT_LIFECYCLE_ACK_PRODUCER,
+    _build_child_agent,
+    delegate_task,
+)
 from hermes_cli import plugins
 
 
@@ -160,6 +164,61 @@ def test_required_start_ack_fails_closed(monkeypatch):
     child = MagicMock()
     with patch("run_agent.AIAgent", return_value=child), patch(
         "hermes_cli.plugins.invoke_hook", return_value=[]
+    ):
+        with pytest.raises(RuntimeError, match="subagent_lifecycle_start_not_acknowledged"):
+            _build_child_agent(
+                task_index=0, goal="must not run", context=None, toolsets=[], model=None,
+                max_iterations=1, task_count=1, parent_agent=_make_parent(),
+            )
+
+
+def test_required_start_ack_accepts_exact_producer_and_event_binding(monkeypatch):
+    monkeypatch.setenv("HERMES_REQUIRE_SUBAGENT_LIFECYCLE_ACK", "1")
+    child = MagicMock()
+
+    def exact_ack(_hook, **payload):
+        return [{
+            "schema_version": 1,
+            "ok": True,
+            "producer": SUBAGENT_LIFECYCLE_ACK_PRODUCER,
+            "event": "start",
+            "child_subagent_id": payload["child_subagent_id"],
+            "lifecycle_event_id": payload["lifecycle_event_id"],
+        }]
+
+    with patch("run_agent.AIAgent", return_value=child), patch(
+        "hermes_cli.plugins.invoke_hook", side_effect=exact_ack
+    ):
+        assert _build_child_agent(
+            task_index=0, goal="may run", context=None, toolsets=[], model=None,
+            max_iterations=1, task_count=1, parent_agent=_make_parent(),
+        ) is child
+
+
+@pytest.mark.parametrize("lifecycle_result", [
+    {"ok": True},
+    {
+        "schema_version": 1, "ok": True,
+        "producer": SUBAGENT_LIFECYCLE_ACK_PRODUCER,
+        "event": "start", "child_subagent_id": "wrong-child",
+        "lifecycle_event_id": "subagent-start:wrong-child",
+    },
+])
+def test_unrelated_or_wrongly_bound_ok_cannot_mask_lifecycle_failure(
+    monkeypatch, lifecycle_result,
+):
+    monkeypatch.setenv("HERMES_REQUIRE_SUBAGENT_LIFECYCLE_ACK", "1")
+    child = MagicMock()
+    # The first result represents an unrelated successful hook. The second
+    # represents the lifecycle producer's failed delivery.
+    results = [lifecycle_result, {
+        "schema_version": 1,
+        "ok": False,
+        "producer": SUBAGENT_LIFECYCLE_ACK_PRODUCER,
+        "event": "start",
+    }]
+    with patch("run_agent.AIAgent", return_value=child), patch(
+        "hermes_cli.plugins.invoke_hook", return_value=results
     ):
         with pytest.raises(RuntimeError, match="subagent_lifecycle_start_not_acknowledged"):
             _build_child_agent(
