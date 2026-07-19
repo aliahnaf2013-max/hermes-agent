@@ -15,7 +15,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tools.delegate_tool import delegate_task
+from tools.delegate_tool import (
+    SUBAGENT_LIFECYCLE_ACK_PRODUCER,
+    _build_child_agent,
+    delegate_task,
+)
 from hermes_cli import plugins
 
 
@@ -135,6 +139,92 @@ class TestSingleTask:
             )
 
         assert captured[0]["parent_session_id"] == "sess-xyz"
+
+    def test_payload_includes_stable_child_identity_and_goal(self):
+        captured = _register_capturing_hook()
+        child = MagicMock()
+        child._delegate_saved_tool_names = []
+        child._credential_pool = None
+        child._subagent_id = "subagent-stable-1"
+        child._subagent_goal = "Original user-facing delegated task"
+        with patch("tools.delegate_tool._build_child_agent", return_value=child), patch(
+            "tools.delegate_tool._run_single_child"
+        ) as mock_run:
+            mock_run.return_value = {
+                "task_index": 0, "status": "completed", "summary": "x",
+                "api_calls": 1, "duration_seconds": 0.1, "_child_role": "qa",
+            }
+            delegate_task(goal="go", parent_agent=_make_parent())
+        assert captured[0]["child_subagent_id"] == "subagent-stable-1"
+        assert captured[0]["child_goal"] == "Original user-facing delegated task"
+
+
+def test_required_start_ack_fails_closed(monkeypatch):
+    monkeypatch.setenv("HERMES_REQUIRE_SUBAGENT_LIFECYCLE_ACK", "1")
+    child = MagicMock()
+    with patch("run_agent.AIAgent", return_value=child), patch(
+        "hermes_cli.plugins.invoke_hook", return_value=[]
+    ):
+        with pytest.raises(RuntimeError, match="subagent_lifecycle_start_not_acknowledged"):
+            _build_child_agent(
+                task_index=0, goal="must not run", context=None, toolsets=[], model=None,
+                max_iterations=1, task_count=1, parent_agent=_make_parent(),
+            )
+
+
+def test_required_start_ack_accepts_exact_producer_and_event_binding(monkeypatch):
+    monkeypatch.setenv("HERMES_REQUIRE_SUBAGENT_LIFECYCLE_ACK", "1")
+    child = MagicMock()
+
+    def exact_ack(_hook, **payload):
+        return [{
+            "schema_version": 1,
+            "ok": True,
+            "producer": SUBAGENT_LIFECYCLE_ACK_PRODUCER,
+            "event": "start",
+            "child_subagent_id": payload["child_subagent_id"],
+            "lifecycle_event_id": payload["lifecycle_event_id"],
+        }]
+
+    with patch("run_agent.AIAgent", return_value=child), patch(
+        "hermes_cli.plugins.invoke_hook", side_effect=exact_ack
+    ):
+        assert _build_child_agent(
+            task_index=0, goal="may run", context=None, toolsets=[], model=None,
+            max_iterations=1, task_count=1, parent_agent=_make_parent(),
+        ) is child
+
+
+@pytest.mark.parametrize("lifecycle_result", [
+    {"ok": True},
+    {
+        "schema_version": 1, "ok": True,
+        "producer": SUBAGENT_LIFECYCLE_ACK_PRODUCER,
+        "event": "start", "child_subagent_id": "wrong-child",
+        "lifecycle_event_id": "subagent-start:wrong-child",
+    },
+])
+def test_unrelated_or_wrongly_bound_ok_cannot_mask_lifecycle_failure(
+    monkeypatch, lifecycle_result,
+):
+    monkeypatch.setenv("HERMES_REQUIRE_SUBAGENT_LIFECYCLE_ACK", "1")
+    child = MagicMock()
+    # The first result represents an unrelated successful hook. The second
+    # represents the lifecycle producer's failed delivery.
+    results = [lifecycle_result, {
+        "schema_version": 1,
+        "ok": False,
+        "producer": SUBAGENT_LIFECYCLE_ACK_PRODUCER,
+        "event": "start",
+    }]
+    with patch("run_agent.AIAgent", return_value=child), patch(
+        "hermes_cli.plugins.invoke_hook", return_value=results
+    ):
+        with pytest.raises(RuntimeError, match="subagent_lifecycle_start_not_acknowledged"):
+            _build_child_agent(
+                task_index=0, goal="must not run", context=None, toolsets=[], model=None,
+                max_iterations=1, task_count=1, parent_agent=_make_parent(),
+            )
 
 
 # ── batch mode ────────────────────────────────────────────────────────────
