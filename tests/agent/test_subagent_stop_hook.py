@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tools.delegate_tool import delegate_task
+from tools.delegate_tool import _build_child_agent, delegate_task
 from hermes_cli import plugins
 
 
@@ -135,6 +135,37 @@ class TestSingleTask:
             )
 
         assert captured[0]["parent_session_id"] == "sess-xyz"
+
+    def test_payload_includes_stable_child_identity_and_goal(self):
+        captured = _register_capturing_hook()
+        child = MagicMock()
+        child._delegate_saved_tool_names = []
+        child._credential_pool = None
+        child._subagent_id = "subagent-stable-1"
+        child._subagent_goal = "Original user-facing delegated task"
+        with patch("tools.delegate_tool._build_child_agent", return_value=child), patch(
+            "tools.delegate_tool._run_single_child"
+        ) as mock_run:
+            mock_run.return_value = {
+                "task_index": 0, "status": "completed", "summary": "x",
+                "api_calls": 1, "duration_seconds": 0.1, "_child_role": "qa",
+            }
+            delegate_task(goal="go", parent_agent=_make_parent())
+        assert captured[0]["child_subagent_id"] == "subagent-stable-1"
+        assert captured[0]["child_goal"] == "Original user-facing delegated task"
+
+
+def test_required_start_ack_fails_closed(monkeypatch):
+    monkeypatch.setenv("HERMES_REQUIRE_SUBAGENT_LIFECYCLE_ACK", "1")
+    child = MagicMock()
+    with patch("run_agent.AIAgent", return_value=child), patch(
+        "hermes_cli.plugins.invoke_hook", return_value=[]
+    ):
+        with pytest.raises(RuntimeError, match="subagent_lifecycle_start_not_acknowledged"):
+            _build_child_agent(
+                task_index=0, goal="must not run", context=None, toolsets=[], model=None,
+                max_iterations=1, task_count=1, parent_agent=_make_parent(),
+            )
 
 
 # ── batch mode ────────────────────────────────────────────────────────────
