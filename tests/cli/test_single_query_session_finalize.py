@@ -202,6 +202,7 @@ def test_human_single_query_main_finalizes_after_query(monkeypatch):
 
 def test_quiet_single_query_main_finalizes_while_preserving_exit_code(monkeypatch):
     calls = []
+    instances = []
 
     import cli as cli_mod
 
@@ -215,6 +216,7 @@ def test_quiet_single_query_main_finalizes_while_preserving_exit_code(monkeypatc
 
     class FakeCLI:
         def __init__(self, **_kwargs):
+            instances.append(self)
             self.provider = "test-provider"
             self.model = "test-model"
             self.session_id = "quiet-session"
@@ -227,6 +229,7 @@ def test_quiet_single_query_main_finalizes_while_preserving_exit_code(monkeypatc
                 suppress_status_output=False,
                 stream_delta_callback=object(),
                 tool_gen_callback=object(),
+                reasoning_callback=object(),
                 run_conversation=run_conversation,
             )
 
@@ -267,4 +270,7 @@ def test_quiet_single_query_main_finalizes_while_preserving_exit_code(monkeypatc
     assert exc_info.value.code == 1
     assert ("claim", "cli", True) in calls
     assert ("run", "hello", []) in calls
+    assert instances[0].agent.stream_delta_callback is None
+    assert instances[0].agent.tool_gen_callback is None
+    assert instances[0].agent.reasoning_callback is None
     assert calls[-1] == ("finalize", "quiet-session")
